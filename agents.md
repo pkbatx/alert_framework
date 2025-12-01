@@ -221,7 +221,6 @@ From filename:
 
 Example layout:
 
-```text
 Glenwood-Pochuck EMS at 18:40 on 12/1/2025
 Call type: EMS
 Agency/Town: Glenwood-Pochuck
