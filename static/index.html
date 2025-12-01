@@ -3,16 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Transcription Monitor</title>
+  <title>Sussex County Alerts</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
 </head>
 <body data-dev-mode="__DEV_MODE__" data-default-cleanup="__DEFAULT_CLEANUP__">
   <div class="page">
     <header class="app-header">
       <div>
-        <p class="eyebrow">Alert Framework</p>
-        <h1>Transcription Monitor</h1>
-        <p class="muted">Watch live jobs, backfill progress, and review recent call transcriptions.</p>
+        <p class="eyebrow">Sussex County Alerts</p>
+        <h1>Unified Call Monitor</h1>
+        <p class="muted">Live call ingestion with quick filtering, waveform playback, and transcript review.</p>
       </div>
       <div class="pill-group" aria-label="System indicators">
         <div class="pill">
@@ -24,6 +26,11 @@
           <span class="label">Workers</span>
           <strong id="worker-count">--</strong>
           <small class="muted">active</small>
+        </div>
+        <div class="pill">
+          <span class="label">Processed</span>
+          <strong id="stat-processed">--</strong>
+          <small class="muted">total</small>
         </div>
       </div>
     </header>
@@ -44,157 +51,78 @@
         </select>
       </div>
       <div class="field">
-        <label for="source-filter">Source</label>
-        <select id="source-filter">
-          <option value="">All sources</option>
-          <option value="watcher">Watcher</option>
-          <option value="backfill">Backfill</option>
+        <label for="tag-filter">Tag</label>
+        <select id="tag-filter">
+          <option value="">All tags</option>
         </select>
+      </div>
+      <div class="window-switch" role="group" aria-label="Time window">
+        <button class="chip active" data-window="24h">24h</button>
+        <button class="chip" data-window="7d">7d</button>
+        <button class="chip" data-window="30d">30d</button>
       </div>
       <button id="refresh-btn" class="primary">Refresh</button>
     </section>
-
-    <div class="active-filter-row" aria-live="polite">
-      <span id="active-tag-filter" class="hidden"></span>
-      <span id="active-tag-hint" class="muted hidden">Click a tag to filter the list.</span>
-    </div>
 
     <main class="layout">
       <section class="panel list-panel">
         <div class="panel-header">
           <div>
             <p class="eyebrow">Recent activity</p>
-            <h2>Transcriptions</h2>
-            <p class="muted" id="list-caption">Latest calls are shown first.</p>
+            <h2>Calls</h2>
+            <p class="muted" id="list-caption">Showing the latest 24h by default.</p>
           </div>
         </div>
         <div id="list" class="call-list" role="list"></div>
-        <div id="empty-state" class="empty hidden">No calls processed yet. New calls will appear here automatically.</div>
+        <div id="empty-state" class="empty hidden">No calls in this window.</div>
         <div id="list-error" class="error hidden" role="alert">Unable to load calls. Please try again.</div>
       </section>
 
-      <section class="stack">
-        <div class="panel status-panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Health</p>
-              <h2>System Status</h2>
-            </div>
-            <button id="retry-status" class="ghost">Reload</button>
-          </div>
-          <div id="status-grid" class="status-grid">
-            <div class="stat"><span class="label">Queue length</span><strong id="stat-queue"></strong></div>
-            <div class="stat"><span class="label">Capacity</span><strong id="stat-capacity"></strong></div>
-            <div class="stat"><span class="label">Workers</span><strong id="stat-workers"></strong></div>
-            <div class="stat"><span class="label">Processed</span><strong id="stat-processed"></strong></div>
-            <div class="stat"><span class="label">Failed</span><strong id="stat-failed"></strong></div>
-          </div>
-          <div class="viz-grid">
-            <div class="viz">
-              <div class="viz-header">
-                <span>Queue fill</span>
-                <strong id="viz-queue-label">--</strong>
-              </div>
-              <div class="viz-bar"><span id="viz-queue"></span></div>
-            </div>
-            <div class="viz">
-              <div class="viz-header">
-                <span>Success ratio</span>
-                <strong id="viz-success-label">--</strong>
-              </div>
-              <div class="viz-bar"><span id="viz-success"></span></div>
-            </div>
-          </div>
-          <div class="backfill">
-            <div class="panel-subheader">
-              <h3>Last Backfill</h3>
-              <p class="muted" id="backfill-caption">No runs yet.</p>
-            </div>
-            <dl class="backfill-grid">
-              <div><dt>Selected</dt><dd id="bf-selected">--</dd></div>
-              <div><dt>Enqueued</dt><dd id="bf-enqueued">--</dd></div>
-              <div><dt>Dropped (full)</dt><dd id="bf-dropped">--</dd></div>
-              <div><dt>Other errors</dt><dd id="bf-errors">--</dd></div>
-              <div><dt>Already processed</dt><dd id="bf-processed">--</dd></div>
-              <div><dt>Unprocessed</dt><dd id="bf-unprocessed">--</dd></div>
-            </dl>
-            <div class="backfill-actions admin-only">
-              <button id="trigger-backfill" class="primary">Run backfill</button>
-              <small class="muted" id="backfill-hint">Runs up to the configured backfill limit.</small>
-            </div>
+      <section class="panel detail-panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Details</p>
+            <h2 id="detail-title">Select a call</h2>
+            <p class="muted" id="detail-meta">Choose an item from the list to view transcript and metadata.</p>
           </div>
         </div>
-
-        <div class="panel detail-panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Details</p>
-              <h2 id="detail-title">Select a call</h2>
-              <p class="muted" id="detail-meta">Choose an item from the list to view transcript and metadata.</p>
+        <div id="detail-content" class="detail-content">
+          <div class="badge-row" id="detail-badges"></div>
+          <p class="muted" id="detail-location"></p>
+          <div class="wave-wrap hidden" id="wave-wrap">
+            <div id="waveform"></div>
+            <div class="player-controls">
+              <button id="play-toggle" class="primary">Play / Pause</button>
+              <a id="detail-audio" class="audio-link" target="_blank" rel="noopener">Open audio file</a>
             </div>
           </div>
-          <div id="detail-content" class="detail-content">
-            <div class="badge-row" id="detail-badges"></div>
-            <p class="muted" id="detail-location"></p>
-            <a id="detail-audio" class="audio-link hidden" target="_blank" rel="noopener">Open audio file</a>
-            <div class="transcript-tabs" aria-label="Transcript view">
-              <button data-tab="clean" class="active">Cleaned</button>
-              <button data-tab="raw">Raw</button>
-              <button data-tab="translation">Translation</button>
-            </div>
-            <pre id="transcript-text" class="transcript-body">No call selected.</pre>
+          <div class="transcript-tabs" aria-label="Transcript view">
+            <button data-tab="clean" class="active">Cleaned</button>
+            <button data-tab="raw">Raw</button>
+            <button data-tab="translation">Translation</button>
           </div>
-        </div>
-
-        <div class="panel settings-panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Defaults</p>
-              <h2>Processing Settings</h2>
-            </div>
-          </div>
-          <form id="settings-form" class="settings-grid admin-only">
-            <label>Default model
-              <select id="setting-model">
-                <option value="whisper-1">whisper-1</option>
-                <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe</option>
-                <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
-                <option value="gpt-4o-transcribe-diarize">gpt-4o-transcribe-diarize</option>
-              </select>
-            </label>
-            <label>Mode
-              <select id="setting-mode">
-                <option value="transcribe">Transcribe</option>
-                <option value="translate">Translate</option>
-              </select>
-            </label>
-            <label>Format
-              <select id="setting-format">
-                <option value="json">json</option>
-                <option value="text">text</option>
-                <option value="srt">srt</option>
-                <option value="vtt">vtt</option>
-                <option value="verbose_json">verbose_json</option>
-                <option value="diarized_json">diarized_json</option>
-              </select>
-            </label>
-            <label class="checkbox">
-              <input type="checkbox" id="setting-auto" /> Auto-translate non-English
-            </label>
-            <label>Webhook endpoints
-              <textarea id="setting-webhooks" rows="2" placeholder="One URL per line"></textarea>
-            </label>
-            <label>Cleanup prompt
-              <textarea id="setting-cleanup" rows="3" placeholder="Default cleanup prompt will be used if left blank."></textarea>
-            </label>
-            <div class="settings-actions">
-              <button type="button" id="reset-cleanup" class="ghost">Use default cleanup prompt</button>
-              <button type="submit" class="primary">Save settings</button>
-            </div>
-          </form>
+          <pre id="transcript-text" class="transcript-body">No call selected.</pre>
         </div>
       </section>
     </main>
+
+    <section class="panel analytics-panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Snapshot</p>
+          <h2>Current window</h2>
+          <p class="muted">Tags and quick visuals update with your filters.</p>
+        </div>
+        <button id="retry-status" class="ghost">Reload status</button>
+      </div>
+      <div class="analytics-grid">
+        <div>
+          <div id="tag-cloud" class="tag-cloud"></div>
+        </div>
+        <div id="plot-status" class="plot"></div>
+        <div id="plot-tags" class="plot"></div>
+      </div>
+    </section>
   </div>
   <script src="/static/app.js"></script>
 </body>
