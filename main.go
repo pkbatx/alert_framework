@@ -27,7 +27,6 @@ import (
 	"syscall"
 	"time"
 
-	"alert_framework/backfill"
 	"alert_framework/config"
 	"alert_framework/formatting"
 	"alert_framework/metrics"
@@ -40,8 +39,6 @@ import (
 var embeddedStatic embed.FS
 
 const (
-	workDir    = "/home/peebs/ai_transcribe"
-	dbPath     = workDir + "/transcriptions.db"
 	groupmeURL = "https://api.groupme.com/v3/bots/post"
 	defaultBot = "03926cdc985a046b27d6393ba6"
 
@@ -169,31 +166,33 @@ type migration struct {
 // DTOs
 
 type transcription struct {
-	ID                   int64     `json:"id"`
-	Filename             string    `json:"filename"`
-	SourcePath           string    `json:"source_path"`
-	Source               string    `json:"source"`
-	Transcript           *string   `json:"transcript_text"`
-	RawTranscript        *string   `json:"raw_transcript_text"`
-	CleanTranscript      *string   `json:"clean_transcript_text"`
-	Translation          *string   `json:"translation_text"`
-	Status               string    `json:"status"`
-	LastError            *string   `json:"last_error"`
-	SizeBytes            *int64    `json:"size_bytes"`
-	DurationSeconds      *float64  `json:"duration_seconds"`
-	Hash                 *string   `json:"hash"`
-	DuplicateOf          *string   `json:"duplicate_of"`
-	RequestedModel       *string   `json:"requested_model"`
-	RequestedMode        *string   `json:"requested_mode"`
-	RequestedFormat      *string   `json:"requested_format"`
-	ActualModel          *string   `json:"actual_openai_model_used"`
-	DiarizedJSON         *string   `json:"diarized_json"`
-	RecognizedTowns      *string   `json:"recognized_towns"`
-	NormalizedTranscript *string   `json:"normalized_transcript"`
-	CallType             *string   `json:"call_type"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
-	Similar              []similar `json:"similar,omitempty"`
+	ID                   int64      `json:"id"`
+	Filename             string     `json:"filename"`
+	SourcePath           string     `json:"source_path"`
+	Source               string     `json:"source"`
+	Transcript           *string    `json:"transcript_text"`
+	RawTranscript        *string    `json:"raw_transcript_text"`
+	CleanTranscript      *string    `json:"clean_transcript_text"`
+	Translation          *string    `json:"translation_text"`
+	Status               string     `json:"status"`
+	LastError            *string    `json:"last_error"`
+	SizeBytes            *int64     `json:"size_bytes"`
+	DurationSeconds      *float64   `json:"duration_seconds"`
+	Hash                 *string    `json:"hash"`
+	DuplicateOf          *string    `json:"duplicate_of"`
+	RequestedModel       *string    `json:"requested_model"`
+	RequestedMode        *string    `json:"requested_mode"`
+	RequestedFormat      *string    `json:"requested_format"`
+	ActualModel          *string    `json:"actual_openai_model_used"`
+	DiarizedJSON         *string    `json:"diarized_json"`
+	RecognizedTowns      *string    `json:"recognized_towns"`
+	NormalizedTranscript *string    `json:"normalized_transcript"`
+	CallType             *string    `json:"call_type"`
+	CallTimestamp        *time.Time `json:"call_timestamp"`
+	TagsJSON             *string    `json:"tags"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+	Similar              []similar  `json:"similar,omitempty"`
 }
 
 type similar struct {
@@ -223,6 +222,7 @@ type transcriptionResponse struct {
 	RecognizedTowns      []string  `json:"recognized_towns,omitempty"`
 	NormalizedTranscript *string   `json:"normalized_transcript,omitempty"`
 	CallType             *string   `json:"call_type,omitempty"`
+	CallTimestamp        time.Time `json:"call_timestamp"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
 	PrettyTitle          string    `json:"pretty_title,omitempty"`
@@ -230,6 +230,25 @@ type transcriptionResponse struct {
 	Agency               string    `json:"agency,omitempty"`
 	AudioURL             string    `json:"audio_url,omitempty"`
 	Tags                 []string  `json:"tags,omitempty"`
+}
+
+type tagCount struct {
+	Tag   string `json:"tag"`
+	Count int    `json:"count"`
+}
+
+type callStats struct {
+	Total           int            `json:"total"`
+	StatusCounts    map[string]int `json:"status_counts"`
+	CallTypeCounts  map[string]int `json:"call_type_counts"`
+	TagCounts       map[string]int `json:"tag_counts"`
+	AvailableWindow string         `json:"window"`
+}
+
+type callListResponse struct {
+	Window string                  `json:"window"`
+	Calls  []transcriptionResponse `json:"calls"`
+	Stats  callStats               `json:"stats"`
 }
 
 type processJob struct {
@@ -273,21 +292,15 @@ type server struct {
 	cfg      config.Config
 	tz       *time.Location
 	ctx      context.Context
-
-	backfillMu      sync.Mutex
-	backfillRunning bool
 }
 
 // QueueDebugResponse represents the payload returned from /debug/queue.
 type QueueDebugResponse struct {
-	Length        int                   `json:"length"`
-	Capacity      int                   `json:"capacity"`
-	Workers       int                   `json:"workers"`
-	ProcessedJobs int64                 `json:"processed_jobs"`
-	FailedJobs    int64                 `json:"failed_jobs"`
-	LastBackfill  metrics.BackfillStats `json:"last_backfill"`
-	HasBackfill   bool                  `json:"has_backfill"`
-	BackfillBusy  bool                  `json:"backfill_running"`
+	Length        int   `json:"length"`
+	Capacity      int   `json:"capacity"`
+	Workers       int   `json:"workers"`
+	ProcessedJobs int64 `json:"processed_jobs"`
+	FailedJobs    int64 `json:"failed_jobs"`
 }
 
 func (s *server) defaultOptions() (TranscriptionOptions, error) {
@@ -319,11 +332,11 @@ func main() {
 	if err := os.MkdirAll(cfg.CallsDir, 0755); err != nil {
 		log.Fatalf("failed to ensure calls dir: %v", err)
 	}
-	if err := os.MkdirAll(workDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.WorkDir, 0755); err != nil {
 		log.Fatalf("failed to ensure work dir: %v", err)
 	}
 
-	db, err := openDB()
+	db, err := openDB(cfg.DBPath)
 	if err != nil {
 		log.Fatalf("init db: %v", err)
 	}
@@ -350,15 +363,12 @@ func main() {
 	m.UpdateQueue(qStats.Length, qStats.Capacity, qStats.WorkerCount)
 
 	go s.watch()
-	log.Printf("starting backfill with limit=%d queue_size=%d workers=%d", cfg.BackfillLimit, cfg.JobQueueSize, cfg.WorkerCount)
-	s.startBackfill(cfg.BackfillLimit)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/transcriptions", s.handleTranscriptions)
 	mux.HandleFunc("/api/transcription/", s.handleTranscription)
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
 	mux.HandleFunc("/api/settings", s.handleSettings)
-	mux.HandleFunc("/api/backfill", s.handleBackfill)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/debug/queue", s.handleDebugQueue)
@@ -447,8 +457,8 @@ func queryRowWithRetry(db *sql.DB, scan func(*sql.Row) error, query string, args
 	})
 }
 
-func openDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dbPath)
+func openDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
@@ -478,6 +488,7 @@ func initDB(db *sql.DB) error {
 	migrations := []migration{
 		{version: 1, name: "baseline schema", up: migrateBaseline},
 		{version: 2, name: "add ingest source", up: migrateAddIngestSource},
+		{version: 3, name: "add call metadata columns", up: migrateAddCallMetadata},
 	}
 	return applyMigrations(db, migrations)
 }
@@ -615,6 +626,16 @@ func migrateAddIngestSource(db *sql.DB) error {
 	return nil
 }
 
+func migrateAddCallMetadata(db *sql.DB) error {
+	if err := addColumnIfMissing(db, "transcriptions", "call_timestamp", "DATETIME"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "transcriptions", "tags", "TEXT"); err != nil {
+		return err
+	}
+	return nil
+}
+
 func addColumnIfMissing(db *sql.DB, table, column, colType string) error {
 	rows, err := queryWithRetry(db, fmt.Sprintf("PRAGMA table_info(%s);", table))
 	if err != nil {
@@ -698,6 +719,10 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 		return false, false
 	}
 	meta, pretty, publicURL := s.buildJobContext(filename)
+	sourcePath := filepath.Join(s.cfg.CallsDir, filename)
+	if err := s.markQueued(filename, sourcePath, source, 0, opts, meta.DateTime); err != nil {
+		log.Printf("mark queued failed for %s: %v", filename, err)
+	}
 	job := queue.Job{
 		ID:       filename,
 		FileName: filename,
@@ -732,106 +757,6 @@ func (s *server) publicURL(filename string) string {
 	return fmt.Sprintf("https://calls.sussexcountyalerts.com/%s", url.PathEscape(filename))
 }
 
-func (s *server) ListCandidates(ctx context.Context) ([]backfill.Record, error) {
-	entries, err := os.ReadDir(s.cfg.CallsDir)
-	if err != nil {
-		return nil, err
-	}
-	statusMap := make(map[string]backfill.Record)
-	rows, err := queryWithRetry(s.db, `SELECT filename, status, updated_at FROM transcriptions`)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var filename, status string
-			var updatedAt time.Time
-			if err := rows.Scan(&filename, &status, &updatedAt); err != nil {
-				continue
-			}
-			statusMap[filename] = backfill.Record{Filename: filename, Status: status, UpdatedAt: updatedAt}
-		}
-	}
-
-	records := make([]backfill.Record, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		rec := backfill.Record{
-			Filename:  entry.Name(),
-			ModTime:   info.ModTime(),
-			SizeBytes: info.Size(),
-		}
-		if st, ok := statusMap[rec.Filename]; ok {
-			rec.Status = st.Status
-			rec.UpdatedAt = st.UpdatedAt
-		}
-		records = append(records, rec)
-	}
-	return records, nil
-}
-
-func (s *server) OnBackfillComplete(summary backfill.Summary) {
-	s.metrics.SetBackfill(summary)
-	if summary.DroppedFull > 0 {
-		log.Printf("backfill dropped %d jobs because queue remained full", summary.DroppedFull)
-	}
-	s.backfillMu.Lock()
-	s.backfillRunning = false
-	s.backfillMu.Unlock()
-}
-
-func (s *server) startBackfill(limit int) bool {
-	s.backfillMu.Lock()
-	if s.backfillRunning {
-		s.backfillMu.Unlock()
-		return false
-	}
-	s.backfillRunning = true
-	s.backfillMu.Unlock()
-
-	ctx := s.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	backfill.Run(ctx, s, limit)
-	return true
-}
-
-func (s *server) isBackfillRunning() bool {
-	s.backfillMu.Lock()
-	defer s.backfillMu.Unlock()
-	return s.backfillRunning
-}
-
-func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) (backfill.EnqueueResult, error) {
-	if rec.Status == statusDone {
-		return backfill.EnqueueResult{}, nil
-	}
-	stale := time.Since(rec.UpdatedAt) > processingStaleAfter
-	if rec.Status == statusProcessing && !stale {
-		return backfill.EnqueueResult{}, nil
-	}
-	if rec.Status == statusQueued && !stale {
-		return backfill.EnqueueResult{}, nil
-	}
-	force := rec.Status == statusProcessing && stale
-	opts, err := s.defaultOptions()
-	if err != nil {
-		log.Printf("using default options with error: %v", err)
-	}
-	sourcePath := filepath.Join(s.cfg.CallsDir, rec.Filename)
-	if err := s.markQueued(rec.Filename, sourcePath, "backfill", rec.SizeBytes, opts); err != nil {
-		log.Printf("mark queued failed for %s: %v", rec.Filename, err)
-		return backfill.EnqueueResult{}, err
-	}
-	enqueued, dropped := s.enqueueWithBackoff(ctx, "backfill", rec.Filename, false, force, opts)
-	return backfill.EnqueueResult{Enqueued: enqueued, DroppedFull: dropped}, nil
-}
-
 func (s *server) processFile(ctx context.Context, j processJob) error {
 	filename := j.filename
 	sourcePath := filepath.Join(s.cfg.CallsDir, filename)
@@ -856,7 +781,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			}
 		}
 	}
-	if err := s.markProcessing(filename, sourcePath, j.source, info.Size(), j.options); err != nil {
+	if err := s.markProcessing(filename, sourcePath, j.source, info.Size(), j.options, j.meta.DateTime); err != nil {
 		status = err.Error()
 		return err
 	}
@@ -885,7 +810,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			log.Printf("failed to mirror duplicate data: %v", err)
 		}
 		note := fmt.Sprintf("duplicate of %s", dup)
-		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil)
+		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil)
 		if j.sendGroupMe {
 			followup := fmt.Sprintf("%s transcript is duplicate of %s", filename, dup)
 			_ = s.sendGroupMe(followup)
@@ -893,7 +818,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		return nil
 	}
 
-	stagedPath := filepath.Join(workDir, filename)
+	stagedPath := filepath.Join(s.cfg.WorkDir, filename)
 	if err := copyFile(sourcePath, stagedPath); err != nil {
 		s.markError(filename, err)
 		status = err.Error()
@@ -919,7 +844,15 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		callType = &ct
 	}
 
-	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType); err != nil {
+	recognized := parseRecognizedTowns(towns)
+	tagsList := s.buildTags(j.meta, recognized, callType)
+	var tagsJSON *string
+	if data, err := json.Marshal(tagsList); err == nil {
+		str := string(data)
+		tagsJSON = &str
+	}
+
+	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType, tagsJSON); err != nil {
 		status = err.Error()
 		return err
 	}
@@ -1038,7 +971,7 @@ func (s *server) callOpenAIWithRetries(path string, opts TranscriptionOptions) (
 	}
 
 	// chunked fallback: split into ~15MB segments
-	chunks, err := chunkFile(path, 15*1024*1024)
+	chunks, err := chunkFile(path, 15*1024*1024, s.cfg.WorkDir)
 	if err != nil {
 		return "", nil, nil, lastErr
 	}
@@ -1409,7 +1342,7 @@ func (s *server) embedTranscript(text string) ([]float64, error) {
 	return parsed.Data[0].Embedding, nil
 }
 
-func chunkFile(path string, maxBytes int64) ([]string, error) {
+func chunkFile(path string, maxBytes int64, workDir string) ([]string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -1502,9 +1435,6 @@ func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
 		Workers:       stats.WorkerCount,
 		ProcessedJobs: snapshot.ProcessedJobs,
 		FailedJobs:    snapshot.FailedJobs,
-		LastBackfill:  snapshot.LastBackfill,
-		HasBackfill:   snapshot.HasBackfillRun,
-		BackfillBusy:  s.isBackfillRunning(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1575,26 +1505,6 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
-}
-
-func (s *server) handleBackfill(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.NotFound(w, r)
-		return
-	}
-
-	limit := s.cfg.BackfillLimit
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
-		}
-	}
-	started := s.startBackfill(limit)
-	if !started {
-		respondJSON(w, map[string]string{"status": "busy"})
-		return
-	}
-	respondJSON(w, map[string]interface{}{"status": "started", "limit": limit})
 }
 
 func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -1813,23 +1723,31 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("q"))
-	statusFilter := r.URL.Query().Get("status")
-	townFilter := strings.TrimSpace(r.URL.Query().Get("town"))
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
 	callTypeFilter := strings.TrimSpace(r.URL.Query().Get("call_type"))
-	sortBy := r.URL.Query().Get("sort")
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if page < 1 {
-		page = 1
-	}
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	if pageSize <= 0 || pageSize > 200 {
-		pageSize = 50
-	}
-	offset := (page - 1) * pageSize
+	tagFilter := parseTagFilter(r.URL.Query().Get("tags"))
 
-	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions`
-	var where []string
-	var args []interface{}
+	windowName := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("window")))
+	if windowName == "" {
+		windowName = "24h"
+	}
+	windowDuration := 24 * time.Hour
+	switch windowName {
+	case "7d", "7days", "week":
+		windowDuration = 7 * 24 * time.Hour
+		windowName = "7d"
+	case "30d", "30days", "month":
+		windowDuration = 30 * 24 * time.Hour
+		windowName = "30d"
+	default:
+		windowName = "24h"
+	}
+
+	cutoff := time.Now().Add(-windowDuration)
+
+	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, created_at, updated_at FROM transcriptions`
+	where := []string{"(call_timestamp >= ? OR (call_timestamp IS NULL AND updated_at >= ?))"}
+	args := []interface{}{cutoff, cutoff}
 	if search != "" {
 		like := "%" + strings.ToLower(search) + "%"
 		where = append(where, "(lower(filename) LIKE ? OR lower(coalesce(clean_transcript_text, transcript_text, '')) LIKE ? OR lower(coalesce(raw_transcript_text, '')) LIKE ? OR lower(coalesce(normalized_transcript, '')) LIKE ?)")
@@ -1839,10 +1757,6 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 		where = append(where, "status = ?")
 		args = append(args, statusFilter)
 	}
-	if townFilter != "" {
-		where = append(where, "recognized_towns LIKE ?")
-		args = append(args, "%"+strings.ToLower(townFilter)+"%")
-	}
 	if callTypeFilter != "" {
 		where = append(where, "lower(coalesce(call_type,'')) = ?")
 		args = append(args, strings.ToLower(callTypeFilter))
@@ -1850,16 +1764,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	if len(where) > 0 {
 		base += " WHERE " + strings.Join(where, " AND ")
 	}
-	switch sortBy {
-	case "size":
-		base += " ORDER BY size_bytes DESC NULLS LAST"
-	case "status":
-		base += " ORDER BY status ASC, updated_at DESC"
-	default:
-		base += " ORDER BY updated_at DESC"
-	}
-	base += " LIMIT ? OFFSET ?"
-	args = append(args, pageSize, offset)
+	base += " ORDER BY COALESCE(call_timestamp, updated_at) DESC LIMIT 500"
 
 	rows, err := queryWithRetry(s.db, base, args...)
 	if err != nil {
@@ -1869,21 +1774,82 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var result []transcriptionResponse
+	var calls []transcriptionResponse
 	for rows.Next() {
 		var t transcription
-		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		result = append(result, s.toResponse(t))
+		calls = append(calls, s.toResponse(t))
 	}
-	respondJSON(w, result)
+
+	filtered := make([]transcriptionResponse, 0, len(calls))
+	stats := callStats{StatusCounts: make(map[string]int), CallTypeCounts: make(map[string]int), TagCounts: make(map[string]int), AvailableWindow: windowName}
+
+	for _, call := range calls {
+		if statusFilter != "" && call.Status != statusFilter {
+			continue
+		}
+		if len(tagFilter) > 0 && !hasTags(call.Tags, tagFilter) {
+			continue
+		}
+		filtered = append(filtered, call)
+		stats.Total++
+		stats.StatusCounts[call.Status]++
+		if call.CallType != nil {
+			stats.CallTypeCounts[strings.ToLower(*call.CallType)]++
+		}
+		for _, tag := range call.Tags {
+			normalized := strings.ToLower(strings.TrimSpace(tag))
+			if normalized == "" {
+				continue
+			}
+			stats.TagCounts[normalized]++
+		}
+	}
+
+	respondJSON(w, callListResponse{Window: windowName, Calls: filtered, Stats: stats})
 }
 
 func respondJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func parseTagFilter(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	var tags []string
+	for _, part := range parts {
+		tag := strings.ToLower(strings.TrimSpace(part))
+		if tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+func hasTags(values []string, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	lookup := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		normalized := strings.ToLower(strings.TrimSpace(v))
+		if normalized == "" {
+			continue
+		}
+		lookup[normalized] = struct{}{}
+	}
+	for _, want := range required {
+		if _, ok := lookup[strings.ToLower(strings.TrimSpace(want))]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func parseRecognizedTownList(raw *string) []string {
@@ -1986,17 +1952,28 @@ func (s *server) toResponse(t transcription) transcriptionResponse {
 	if err != nil {
 		meta = formatting.CallMetadata{RawFileName: t.Filename, DateTime: t.UpdatedAt.In(s.tz)}
 	}
-	if meta.DateTime.IsZero() {
-		meta.DateTime = time.Now().In(s.tz)
+	callTime := meta.DateTime
+	if t.CallTimestamp != nil {
+		callTime = t.CallTimestamp.In(s.tz)
 	}
+	if callTime.IsZero() {
+		callTime = meta.DateTime
+	}
+	if callTime.IsZero() {
+		callTime = t.CreatedAt.In(s.tz)
+	}
+	meta.DateTime = callTime
 	recognized := parseRecognizedTownList(t.RecognizedTowns)
 	callType := t.CallType
 	if callType == nil && meta.CallType != "" {
 		ct := meta.CallType
 		callType = &ct
 	}
-	pretty := formatting.FormatPrettyTitle(t.Filename, meta.DateTime, s.tz)
-	tags := s.buildTags(meta, recognized, callType)
+	pretty := formatting.FormatPrettyTitle(t.Filename, callTime, s.tz)
+	tags := parseRecognizedTownList(t.TagsJSON)
+	if len(tags) == 0 {
+		tags = s.buildTags(meta, recognized, callType)
+	}
 
 	return transcriptionResponse{
 		Filename:             t.Filename,
@@ -2020,6 +1997,7 @@ func (s *server) toResponse(t transcription) transcriptionResponse {
 		RecognizedTowns:      recognized,
 		NormalizedTranscript: t.NormalizedTranscript,
 		CallType:             callType,
+		CallTimestamp:        callTime,
 		CreatedAt:            t.CreatedAt,
 		UpdatedAt:            t.UpdatedAt,
 		PrettyTitle:          pretty,
@@ -2136,30 +2114,38 @@ func (s *server) ensureSettingsRow() error {
 func (s *server) getTranscription(filename string) (*transcription, error) {
 	var t transcription
 	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
-		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt)
-	}, `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
+		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.CreatedAt, &t.UpdatedAt)
+	}, `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
 		return nil, err
 	}
 	return &t, nil
 }
 
-func (s *server) markQueued(filename, sourcePath, source string, size int64, opts TranscriptionOptions) error {
+func (s *server) markQueued(filename, sourcePath, source string, size int64, opts TranscriptionOptions, callTime time.Time) error {
 	var sizeVal interface{}
 	if size > 0 {
 		sizeVal = size
 	}
-	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format)`, filename, sourcePath, source, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format)
+	callTimestamp := callTime
+	if callTimestamp.IsZero() {
+		callTimestamp = time.Now().In(s.tz)
+	}
+	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format, call_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format), call_timestamp=COALESCE(transcriptions.call_timestamp, excluded.call_timestamp)`, filename, sourcePath, source, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format, callTimestamp)
 	return err
 }
 
-func (s *server) markProcessing(filename, sourcePath, source string, size int64, opts TranscriptionOptions) error {
-	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format`, filename, sourcePath, source, statusProcessing, size, opts.Model, opts.Mode, opts.Format)
+func (s *server) markProcessing(filename, sourcePath, source string, size int64, opts TranscriptionOptions, callTime time.Time) error {
+	callTimestamp := callTime
+	if callTimestamp.IsZero() {
+		callTimestamp = time.Now().In(s.tz)
+	}
+	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format, call_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format, call_timestamp=COALESCE(transcriptions.call_timestamp, excluded.call_timestamp)`, filename, sourcePath, source, statusProcessing, size, opts.Model, opts.Mode, opts.Format, callTimestamp)
 	return err
 }
 
-func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string, diarized *string, towns *string, normalized *string, actualModel *string, callType *string) error {
-	_, err := execWithRetry(s.db, `UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=? WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, filename)
+func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string, diarized *string, towns *string, normalized *string, actualModel *string, callType *string, tags *string) error {
+	_, err := execWithRetry(s.db, `UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(?, tags) WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, tags, filename)
 	return err
 }
 
@@ -2254,7 +2240,7 @@ func (s *server) copyFromDuplicate(filename, duplicate string) error {
 	if err != nil {
 		return err
 	}
-	_, err = execWithRetry(s.db, `UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=? WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, filename)
+	_, err = execWithRetry(s.db, `UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(transcriptions.tags, ?), call_timestamp=COALESCE(transcriptions.call_timestamp, ?) WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, src.TagsJSON, src.CallTimestamp, filename)
 	return err
 }
 

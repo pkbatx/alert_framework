@@ -2,17 +2,6 @@ package config
 
 import "testing"
 
-func TestBackfillLimitClamp(t *testing.T) {
-	t.Setenv("BACKFILL_LIMIT", "200")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("load failed: %v", err)
-	}
-	if cfg.BackfillLimit != maxBackfillLimit {
-		t.Fatalf("expected backfill limit %d, got %d", maxBackfillLimit, cfg.BackfillLimit)
-	}
-}
-
 func TestQueueSizeDefaultsRespectWorkers(t *testing.T) {
 	t.Setenv("WORKER_COUNT", "8")
 	t.Setenv("JOB_QUEUE_SIZE", "4")
@@ -36,5 +25,17 @@ func TestHTTPPortDefaultFormatting(t *testing.T) {
 	}
 	if cfg.HTTPPort != ":9000" {
 		t.Fatalf("expected HTTP_PORT to include colon, got %s", cfg.HTTPPort)
+	}
+}
+
+func TestDBPathDefaultsToWorkDir(t *testing.T) {
+	t.Setenv("WORK_DIR", "/tmp/custom")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	expected := "/tmp/custom/transcriptions.db"
+	if cfg.DBPath != expected {
+		t.Fatalf("expected DBPath %s, got %s", expected, cfg.DBPath)
 	}
 }
