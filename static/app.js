@@ -142,12 +142,22 @@
 
   function renderTranscript(call) {
     state.segments = normalizeSegments(call);
+    const transcriptText =
+      (call.clean_transcript_text || call.raw_transcript_text || call.transcript_text || call.translation_text || '').trim();
     transcriptEl.innerHTML = '';
     transcriptEl.classList.toggle('playing', highlightToggle.checked && state.wavesurfer && state.wavesurfer.isPlaying());
     if (!state.segments.length) {
       const placeholder = document.createElement('p');
       placeholder.className = 'muted';
-      placeholder.textContent = 'Transcript pending.';
+      if (call.status === 'done') {
+        placeholder.textContent = transcriptText
+          ? 'Transcript ready but could not be displayed yet.'
+          : 'Transcript unavailable for this completed call.';
+      } else if (call.status === 'error' && call.last_error) {
+        placeholder.textContent = `Transcription failed: ${call.last_error}`;
+      } else {
+        placeholder.textContent = 'Transcript pending.';
+      }
       transcriptEl.appendChild(placeholder);
       return;
     }
@@ -275,6 +285,17 @@
     font: { color: '#e8eeff' },
   };
 
+  function callsWithinMinutes(calls, minutes) {
+    if (!Number.isFinite(minutes) || minutes <= 0) return [];
+    const cutoff = Date.now() - minutes * 60 * 1000;
+    return calls.filter((call) => {
+      const tsValue = call.call_timestamp || call.created_at || call.updated_at;
+      if (!tsValue) return false;
+      const ts = new Date(tsValue).getTime();
+      return Number.isFinite(ts) && ts >= cutoff;
+    });
+  }
+
   function renderBarChart(targetId, labels, values, color, emptyLabel) {
     const el = document.getElementById(targetId);
     if (!labels.length || !values.length) {
@@ -289,7 +310,8 @@
 
   function renderMap() {
     if (!mapChart) return;
-    const points = state.calls
+    const callsForMap = callsWithinMinutes(state.calls, 60);
+    const points = callsForMap
       .filter((call) => call.location && Number.isFinite(call.location.latitude) && Number.isFinite(call.location.longitude))
       .map((call) => ({
         lat: call.location.latitude,
@@ -304,7 +326,7 @@
     }
 
     if (!points.length) {
-      mapChart.innerHTML = '<p class="muted">No mappable calls in this window yet.</p>';
+      mapChart.innerHTML = '<p class="muted">No mappable calls from the last hour yet.</p>';
       Plotly.purge('map-chart');
       return;
     }
