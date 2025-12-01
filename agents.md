@@ -1,18 +1,21 @@
-Yeah, it’ll help a lot—for you and for future Codex/Copilot runs. Here’s an updated AGENTS.md you can drop into the repo (or overwrite the old one).
-
-# Alert Framework – Agents Guide
 
 ## 1. Purpose
 
-This service watches a call recordings directory, queues work for transcription + alert delivery, and exposes a small HTTP API for viewing transcriptions and health.
+This service watches a call-recordings directory, normalizes filenames, pushes alerts to GroupMe, and provides a UI to review calls and AI-generated transcripts.
 
-It is built to:
+Core behaviors:
 
-- Process **new** calls as they arrive.
-- Safely **backfill** the **last N unprocessed** calls on startup (default: 15).
-- Run all work through a **bounded, observable job queue** with a fixed worker pool.
+- Detect new `.mp3` call files (live + backfill).
+- Immediately send a **prettified “call started” alert** to the assigned GroupMe channel.
+- Use OpenAI **speech-to-text** to generate a transcript for each call.
+- Send a **second “call transcript” alert** to the same GroupMe channel using the **same formatting**, with the transcript appended.
+- Store calls + transcripts in a local DB.
+- Expose a UI that:
+  - Shows the **last 24 hours** of calls by default.
+  - Lets you **view** existing transcripts.
+  - Lets you **generate/regenerate** a transcript on demand if one is missing/stale.
 
-This doc is the source of truth for how the agents (watcher, backfill, workers, HTTP) are supposed to behave.
+This document is the source of truth for how the agents (watcher, backfill, queue/workers, AI pipeline, UI) must behave.
 
 ---
 
@@ -21,284 +24,312 @@ This doc is the source of truth for how the agents (watcher, backfill, workers, 
 ### Components
 
 - **Config**
-  - Parses env vars into a `Config` struct.
-  - Controls queue size, worker count, backfill limit, ports, paths, tokens.
+  - Reads env vars into a `Config` struct (paths, ports, GroupMe, OpenAI, queue, backfill, DB).
+  - Provides safe defaults and clamping (e.g., backfill limit caps).
 
 - **Queue / Worker Pool**
-  - Single shared in-process job queue.
-  - Fixed-size buffered channel for jobs.
-  - N worker goroutines pulling from the queue and executing jobs.
+  - Single shared in-process job queue (bounded channel).
+  - Fixed number of workers handling jobs concurrently.
+  - All work (live calls, backfill, on-demand transcription) flows through this queue.
+
+- **File Watcher**
+  - Watches `CALLS_DIR` (e.g., `/home/peebs/calls`) for new/moved-in `.mp3` files.
+  - On new file:
+    - Builds a `Job` with parsed metadata.
+    - Enqueues the job to the shared queue.
+    - Job type: `"call_ingest"`.
 
 - **Backfill**
-  - On startup, inspects historical calls in `/home/peebs/calls` (or configured path).
-  - Selects at most **BACKFILL_LIMIT** unprocessed files (newest first).
-  - Attempts to enqueue them into the shared job queue.
-  - Logs a detailed summary: what it saw, what it selected, what it actually enqueued.
+  - On startup, scans `CALLS_DIR` for historical `.mp3`s.
+  - Determines which calls are already processed vs unprocessed.
+  - Selects at most `BACKFILL_LIMIT` **unprocessed** newest calls.
+  - Enqueues them as `"call_ingest"` jobs.
+  - Updates `LastBackfill` stats for metrics + UI.
 
-- **Watcher**
-  - Uses fsnotify (or similar) to monitor the call directory.
-  - On new file/move-in, builds a job and enqueues it into the same queue.
-  - Identified as `job_source=watcher` in logs.
+- **Formatter / Metadata (Prettify)**
+  - Parses filenames into `CallMetadata`:
+    - `AgencyDisplay`, `TownDisplay`, `CallType`, `DateTime`, `RawFileName`.
+    - Example filename: `Glenwood-Pochuck_EMS_2025_11_27_19_58_13.mp3`.
+  - Generates a prettified title similar to the original `pretty.sh`:
+    - Strips digits/underscores and `.mp3`.
+    - Normalizes tokens (`TWP`, `FD`, `Gen`, `Duty` as separate words).
+    - Adds spaces between lower→upper boundaries.
+    - Timestamp suffix: `HH:MM on M/D/YYYY` in Eastern time.
+  - Builds final alert text templates that are reused by both the initial alert and the transcript follow-up.
 
-- **Processor**
-  - Worker function that executes a pipeline per job:
-    - Load + validate file.
-    - Run transcription.
-    - Push alert(s) to downstream (e.g., GroupMe, DB).
-  - Logs per-step timings and outcome.
+- **AI Transcription Pipeline**
+  - Uses OpenAI’s `/v1/audio/transcriptions` with models like:
+    - `gpt-4o-transcribe` (higher quality), or
+    - `gpt-4o-mini-transcribe` (cheaper/faster).
+  - Sends `.mp3` contents to the OpenAI API and stores the returned text in the DB.
+  - Optionally uses `prompt` for improved domain accuracy (agency names, streets, acronyms).
 
-- **HTTP Server**
+- **Notifier (GroupMe)**
+  - Sends messages to one or more GroupMe channels:
+    - First message: “Call Alert” (no transcript).
+    - Second message: “Call Alert + Transcript”.
+  - Uses the same layout for both, just with transcript content appended on the second pass.
+
+- **Local Store (DB)**
+  - SQLite DB at `TRANSCRIPT_DB_PATH` (e.g., `/home/peebs/ai_transcribe/transcriptions.db`).
+  - Tracks:
+    - Call file (path, filename, metadata).
+    - Timestamps (detected, alerted, transcribed).
+    - Transcript text and status (`pending`, `success`, `failed`).
+    - Group/channel routing info.
+
+- **HTTP Server + UI**
   - Serves:
-    - `/api/transcriptions` (UI/data for current transcriptions).
-    - `/healthz` (liveness).
-    - `/readyz` (readiness).
-    - `/debug/queue` (internal queue + backfill stats; JSON).
+    - `/` – main UI for calls and transcripts.
+    - `/healthz` – liveness.
+    - `/readyz` – readiness.
+    - `/debug/queue` – JSON queue + metrics.
+  - UI shows the **last 24 hours of calls** by default, with controls to:
+    - Filter by time range, call type, agency.
+    - Trigger “(Re)Generate transcript” per call (enqueue job).
+    - View call details + transcript.
 
 ---
 
-## 3. Configuration (Env Vars)
-
-These names may be implemented slightly differently in code; this is the intended contract.
+## 3. Configuration
 
 ### Core
 
 - `HTTP_PORT`
-  - Port for the HTTP server (e.g., `:8000`).
-  - Default: `:8000` if unset.
+  - Default: `:8000`.
 
 - `CALLS_DIR`
-  - Directory to watch for call audio (default: `/home/peebs/calls`).
+  - Directory for call audio.
+  - Default: `/home/peebs/calls`.
 
-### Backfill
+- `TRANSCRIPT_DB_PATH`
+  - SQLite file for metadata + transcripts.
+  - Default: `/home/peebs/ai_transcribe/transcriptions.db`.
+
+### Backfill / Queue
 
 - `BACKFILL_LIMIT`
   - Max number of **unprocessed** calls to backfill on startup.
   - Default: `15`.
-  - Hard max enforced in config: `50`.
-  - Values > 50 are clamped to 50 with a warning.
-
-Semantics:
-
-- Backfill considers **all files** in `CALLS_DIR`.
-- Filters out those already marked as “processed” (based on DB/metadata).
-- Sorts remaining unprocessed files **newest → oldest**.
-- Picks at most `BACKFILL_LIMIT` of those.
-- Attempts to enqueue each into the queue.
-
-### Queue / Worker Pool
+  - Hard max: `50`.
 
 - `JOB_QUEUE_SIZE`
-  - Capacity of the in-memory job channel.
-  - Default: `100`.
-  - Hard max: e.g., `1024` (implementation detail).
-  - Must be >= workers; invalid values fall back to defaults.
+  - Channel capacity for jobs.
+  - Default: `100` (clamped to a sane max, e.g. `1024`).
 
 - `WORKER_COUNT`
   - Number of worker goroutines.
-  - Default: `4`.
-  - Minimum `1`; invalid values fall back to default.
+  - Default: `4` (min `1`).
 
-### External Integrations
-
-(Names may vary; keep in sync with actual code.)
+### GroupMe / Webhooks
 
 - `GROUPME_BOT_ID`
 - `GROUPME_ACCESS_TOKEN`
-- Any transcription API keys / base URLs.
-- DB DSN or path for storing transcriptions/metadata.
+- Optional routing env vars for different agencies/channels.
+
+### OpenAI Transcription
+
+- `OPENAI_API_KEY` (required).
+- `OPENAI_TRANSCRIBE_MODEL`
+  - Default: `gpt-4o-mini-transcribe`.
+  - Alternative: `gpt-4o-transcribe`, `whisper-1`.
+- `OPENAI_TRANSCRIBE_TIMEOUT_SECONDS`
+  - Default: e.g. `60`.
 
 ---
 
-## 4. Job Model
+## 4. Job Model & Types
 
-### Job Fields (conceptual)
+### CallMetadata
 
-Each job represents processing a single call file:
+Conceptual struct (language-agnostic):
 
-- `Source` – `"backfill"` or `"watcher"` (may be extended).
-- `FileName` – basename (e.g., `Glenwood-Pochuck_EMS_2025_11_27_19_58_13.mp3`).
-- `FullPath` – absolute path to the file.
-- `CreatedAt` – derived from filename or fs metadata when available.
-- `Attempts` – for future retry policies (currently simple one-shot).
+- `RawFileName`
+- `AgencyDisplay`
+- `TownDisplay`
+- `CallType`
+- `DateTime` (parsed from filename + Eastern TZ)
 
-There is exactly **one** queue instance created in `main` and shared by all producers and workers.
+### Job
+
+Core job types:
+
+1. **`"call_ingest"`**
+   - Triggered by watcher or backfill.
+   - Steps:
+     1. Parse `CallMetadata` from filename.
+     2. Send **initial alert** to GroupMe (prettified, no transcript).
+     3. Insert/update DB record for the call:
+        - Mark status `transcription_pending`.
+     4. Enqueue a follow-up `"transcription"` job (or perform transcription inline if acceptable).
+
+2. **`"transcription"`**
+   - Triggered automatically after `"call_ingest"` or from UI on demand.
+   - Steps:
+     1. Read audio file from disk.
+     2. Call OpenAI `/v1/audio/transcriptions`:
+        - model: `OPENAI_TRANSCRIBE_MODEL`.
+        - file: `.mp3` stream.
+        - response_format: `text` or `json` with `.text`.
+     3. Update DB with transcript text, mark status `success` or `failed`.
+     4. Send **second alert** to GroupMe:
+        - Same base layout as initial alert.
+        - Adds a `Transcript:` section at the bottom.
+
+3. **(Optional) `"transcription_regen"`**
+   - Triggered by UI “Regenerate transcript” button.
+   - Same as `"transcription"`, but overwrites existing text and logs a regen event.
+
+Jobs share:
+
+- `Source` – `"watcher"`, `"backfill"`, `"ui"`.
+- `FilePath`, `FileName`.
+- `Meta` – `CallMetadata`.
+- `JobType`.
 
 ---
 
-## 5. Backfill Semantics
+## 5. Alert Formatting (Prettify + Templates)
 
-### Startup Sequence (Happy Path)
+### Prettified Title
 
-1. Config is loaded (limit, queue size, worker count, paths).
-2. Queue is created with configured capacity.
-3. Worker pool is started.
-4. HTTP server is started (listening on `HTTP_PORT`).
-5. Watcher is started on `CALLS_DIR`.
-6. Backfill is launched in its own goroutine:
-   - Scans `CALLS_DIR`.
-   - Classifies files as **already processed** vs **unprocessed**.
-   - Selects up to `BACKFILL_LIMIT` newest unprocessed files.
-   - Attempts to enqueue each into the queue.
+Behavior equivalent to the original `pretty.sh`:
 
-### Backfill Logging
+- Input filename: `Glenwood-Pochuck_EMS_2025_11_27_19_58_13.mp3`.
+- Steps:
+  - Strip digits and underscores and `.mp3`.
+  - Insert spaces between lower→upper letter boundaries.
+  - Make `TWP`, `FD`, `Gen`, `Duty` separate tokens.
+  - Collapse whitespace.
+  - Add Eastern timestamp suffix: `HH:MM on M/D/YYYY`.
+- Example output:
+  - `Glenwood-Pochuck EMS at 18:40 on 12/1/2025`.
 
-On startup you should see logs like:
+### CallMetadata-derived Fields
+
+From filename:
+
+- `CallType`: e.g. `EMS`, `FIRE`, `GEN`.
+- `AgencyDisplay`: e.g. `Glenwood-Pochuck`.
+
+### Alert Template (First Message)
+
+**Initial “Call Alert” GroupMe message:**
+
+- Uses prettified header + metadata.
+- No transcript yet.
+
+Example layout:
 
 ```text
-starting backfill with limit=15 queue_size=100 workers=4
-server listening on :8000
-watching /home/peebs/calls for new files
-backfill summary: total=393 unprocessed=389 selected=15 enqueued=15 dropped_full=0 other_errors=0 already_processed=4
-queue stats: length=15 capacity=100 workers=4
+Glenwood-Pochuck EMS at 18:40 on 12/1/2025
+Call type: EMS
+Agency/Town: Glenwood-Pochuck
+Listen: https://calls.sussexcountyalerts.com/<path>
 
-Definitions:
-	•	total – total files encountered in the directory.
-	•	already_processed – files skipped because they’re already done.
-	•	unprocessed – files that appear not yet processed.
-	•	selected – min(unprocessed, BACKFILL_LIMIT).
-	•	enqueued – jobs actually put onto the queue successfully.
-	•	dropped_full – jobs that could not be enqueued because the queue stayed full after bounded retries.
-	•	other_errors – any enqueue failures that were not “queue is full.”
+This message is sent as soon as the file is detected / ingested, before AI transcription.
 
-If selected > 0 and enqueued == 0, there is a bug or misconfiguration and logs around enqueue will state why.
+Alert Template (Second Message with Transcript)
 
-⸻
+Follow-up “Call Transcript” GroupMe message:
+	•	Same header + fields as the initial alert.
+	•	Adds a Transcript: section.
 
-6. Queue Behavior
+Example:
 
-Enqueue
+Glenwood-Pochuck EMS at 18:40 on 12/1/2025
+Call type: EMS
+Agency/Town: Glenwood-Pochuck
+Listen: https://calls.sussexcountyalerts.com/<path>
 
-Producers (backfill, watcher, HTTP-triggered jobs) call queue.Enqueue(ctx, job):
-	•	If channel has capacity:
-	•	Job is pushed, returns nil.
-	•	If channel is full:
-	•	Implementation uses a bounded retry:
-	•	Non-blocking initial attempt.
-	•	Brief retries over a small window (e.g., up to ~5s).
-	•	If still full after that window:
-	•	Returns ErrQueueFull.
-	•	Backfill increments dropped_full and logs once per backfill run.
-	•	If ctx is cancelled:
-	•	Returns ctx.Err().
+Transcript:
+<full text from OpenAI transcription>
 
-Workers
-	•	Number of workers = WORKER_COUNT.
-	•	Each worker:
-	•	Loops on the job channel.
-	•	Wraps each job in a per-job context with timeout (e.g., 60s).
-	•	Executes the processing pipeline.
-	•	Logs detailed timing.
-
-Shutdown:
-	•	On SIGINT/SIGTERM, main cancels a root context.
-	•	New enqueues stop.
-	•	Workers finish in-flight jobs up to a grace period.
-	•	Queue metrics are logged on exit.
+Rules:
+	•	Both messages go to the same GroupMe channel used today.
+	•	Second message should only send when a transcript exists and is marked success.
 
 ⸻
 
-7. Processing Pipeline
+6. Transcription Pipeline (OpenAI)
 
-For each job (both backfill and watcher):
-	1.	Decode / Input Prep
-	•	Open the file, validate it’s a supported audio type.
-	•	Normalize paths, extract metadata from filename if needed.
-	2.	Transcription
-	•	Call the configured transcription endpoint.
-	•	Handle network errors, timeouts, non-200s.
-	•	Store transcription into local DB/file-based store.
-	3.	Notification
-	•	Format a message (system + agency + summary + link).
-	•	POST to GroupMe or other downstream channel.
-	•	Update local state to mark file as “processed”.
+API Usage
 
-Timing Logs
+For each "transcription" job:
+	•	Call POST /v1/audio/transcriptions with:
+	•	Authorization: Bearer $OPENAI_API_KEY
+	•	file: audio .mp3.
+	•	model: OPENAI_TRANSCRIBE_MODEL (e.g., gpt-4o-mini-transcribe).
+	•	response_format: text (simple) or json (then use .text).
 
-Each job log should include per-step timings, for example:
+Basic contract:
+	•	Input ≤ 25 MB per file.
+	•	Supported formats: .mp3 (already what we have).
+	•	Timeout controlled by OPENAI_TRANSCRIBE_TIMEOUT_SECONDS.
 
-job_source=backfill file=Alamuchy-Green_EMS_2025_12_01_12_40_51.mp3 total=11.5s decode=0.2s transcribe=10.8s notify=0.3s status=success
-
-These timings make it obvious where latency is coming from (transcription vs I/O vs webhook).
-
-⸻
-
-8. HTTP Endpoints
-
-/api/transcriptions
-	•	Returns HTML or JSON with recent transcriptions.
-	•	Supports basic browsing of processed calls.
-
-/healthz (Liveness)
-	•	Always 200 if the process is running.
-	•	No external dependencies.
-
-/readyz (Readiness)
-	•	200 only when:
-	•	Queue is initialized.
-	•	Worker pool is running.
-	•	Any required DB/storage checks pass.
-	•	Non-200 on startup failure or critical dependency failure.
-
-/debug/queue (Debug / Metrics)
-	•	Returns JSON similar to:
-
-{
-  "length": 5,
-  "capacity": 100,
-  "workers": 4,
-  "last_backfill": {
-    "total": 393,
-    "unprocessed": 389,
-    "selected": 15,
-    "enqueued": 15,
-    "dropped_full": 0,
-    "other_errors": 0,
-    "already_processed": 4
-  },
-  "processed_jobs": 123,
-  "failed_jobs": 2
-}
-
-Use this to verify backfill and queue behavior without tailing logs.
+Error Handling
+	•	On API error/timeout:
+	•	Mark transcript status failed with error payload (for debugging).
+	•	Do not send transcript alert.
+	•	The UI should show this call as “Transcript failed” and allow manual retry (enqueue "transcription_regen").
 
 ⸻
 
-9. Running & Operations
+7. UI Behavior
 
-Local Run
+Default View
+	•	Shows last 24 hours of calls by default:
+	•	Based on file timestamp or parsed DateTime.
+	•	Each row/card includes:
+	•	Time.
+	•	Agency/Town.
+	•	Call type.
+	•	Source: watcher vs backfill.
+	•	Transcript status: pending, success, failed.
+	•	Actions:
+	•	“View transcript” (if exists).
+	•	“Generate transcript” or “Regenerate” (if missing/failed).
 
-go run main.go
+Transcript On-Demand
+	•	When user clicks “Generate transcript”:
+	•	Enqueue a "transcription_regen" job.
+	•	UI marks as pending.
+	•	When job completes:
+	•	Show transcript in UI.
+	•	Optionally send the transcript alert to GroupMe (same layout as above).
 
-Environment typically set via .env or systemd unit:
-	•	Ensure CALLS_DIR exists and contains .mp3 files.
-	•	Set transcription + GroupMe env vars before starting.
-
-Common Checks
-	•	On startup, look for:
-	•	starting backfill with limit=...
-	•	server listening on :8000
-	•	watching /home/peebs/calls for new files
-	•	A reasonable backfill summary (selected and enqueued > 0 when there are unprocessed files).
-	•	To debug “stuck” conditions:
-	•	Hit /debug/queue:
-	•	If length == 0 and selected > 0 but enqueued == 0, investigate enqueue errors.
-	•	If length is near capacity, consider increasing JOB_QUEUE_SIZE or reducing backfill/ingest rate.
-	•	Check per-job logs for long transcribe durations.
+System Status Panel
+	•	Shows:
+	•	Queue length / capacity / workers.
+	•	Processed/failed job counts.
+	•	Last backfill stats (total, unprocessed, selected, enqueued, dropped_full, other_errors, already_processed).
+	•	Data is sourced from a central Metrics struct and the queue (/debug/queue).
 
 ⸻
 
-10. Extension Guidelines (for future agents / Codex work)
+8. Lifecycle & Idempotency
+	•	Initial alert idempotency:
+	•	For each file, store a DB row keyed by filename/path.
+	•	Only send the initial alert once per call (unless explicitly retried).
+	•	Transcript idempotency:
+	•	If status == success and transcript text is present, skip auto-regeneration.
+	•	UI-driven “Regenerate” can override this but should be explicit.
+	•	Backfill:
+	•	On restart, backfill:
+	•	Ignores calls that already have DB entries + transcript status.
+	•	Only re-enqueues unprocessed calls up to BACKFILL_LIMIT.
 
-When adding new capabilities (e.g., different alert channels, alternative transcription providers):
-	•	Do not bypass the queue:
-	•	All work must go through the same Queue API.
-	•	Tag job sources:
-	•	Use job.Source to differentiate backfill vs watcher vs API-triggered work, so logs remain readable.
-	•	Keep new configuration in the same Config struct and document new env vars here.
-	•	Add tests for:
-	•	Backfill selection.
-	•	Queue behavior under full conditions.
-	•	New processing branches (e.g., new notifiers).
+⸻
 
-This document should be kept in sync whenever queue, backfill, or processing semantics change.
+9. Extension Guidelines
+
+When adding new capabilities:
+	•	Do not bypass the shared queue; all work should be jobs.
+	•	Use CallMetadata + prettified formatting for all user-facing text.
+	•	Keep GroupMe and other notifiers using the same two-stage alert pattern:
+	•	Quick initial alert.
+	•	Follow-up with AI transcript.
+	•	Keep configs centralized and documented here.
+
+This AGENTS.md is the reference for any future Codex/Copilot changes.
 
