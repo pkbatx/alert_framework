@@ -684,7 +684,7 @@ func (s *server) catchupPending() {
 			if err := s.markQueued(filename, sourcePath, size, opts); err != nil {
 				log.Printf("catch-up queue update failed for %s: %v", filename, err)
 			}
-			s.queueJob(filename, false, force, opts)
+			s.queueBackfillJob(filename, force, opts)
 			queued++
 		}
 	}
@@ -1682,9 +1682,9 @@ func (s *server) loadSettings() (AppSettings, error) {
 	}, `SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt FROM app_settings WHERE id=1`); err != nil {
 		return settings, err
 	}
-	settings.DefaultModel = stringFromNull(defaultModel, "gpt-4o-transcribe")
-	settings.DefaultMode = stringFromNull(defaultMode, "transcribe")
-	settings.DefaultFormat = stringFromNull(defaultFormat, "json")
+	settings.DefaultModel = fallbackEmpty(stringFromNull(defaultModel, "gpt-4o-transcribe"), "gpt-4o-transcribe")
+	settings.DefaultMode = fallbackEmpty(stringFromNull(defaultMode, "transcribe"), "transcribe")
+	settings.DefaultFormat = fallbackEmpty(stringFromNull(defaultFormat, "json"), "json")
 	settings.PreferredLanguage = stringFromNull(preferredLanguage, "")
 	settings.CleanupPrompt = strings.TrimSpace(stringFromNull(cleanupPrompt, ""))
 	settings.AutoTranslate = auto.Valid && auto.Int64 == 1
@@ -1699,6 +1699,9 @@ func (s *server) loadSettings() (AppSettings, error) {
 	if strings.TrimSpace(settings.CleanupPrompt) == "" {
 		settings.CleanupPrompt = defaultCleanupPrompt
 	}
+	settings.DefaultModel = fallbackEmpty(settings.DefaultModel, "gpt-4o-transcribe")
+	settings.DefaultMode = fallbackEmpty(settings.DefaultMode, "transcribe")
+	settings.DefaultFormat = fallbackEmpty(settings.DefaultFormat, "json")
 	return settings, nil
 }
 
@@ -1707,6 +1710,13 @@ func stringFromNull(ns sql.NullString, fallback string) string {
 		return ns.String
 	}
 	return fallback
+}
+
+func fallbackEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (s *server) saveSettings(settings AppSettings) error {
