@@ -63,6 +63,16 @@ const (
 	statusError      = "error"
 )
 
+const (
+	processingStaleAfter = 3 * time.Hour
+)
+
+type migration struct {
+	version int
+	name    string
+	up      func(db *sql.DB) error
+}
+
 // DTOs
 
 type transcription struct {
@@ -182,6 +192,7 @@ func main() {
 	for i := 0; i < s.workerCount; i++ {
 		go s.worker()
 	}
+	go s.runStartupSync()
 	go s.watch()
 
 	mux := http.NewServeMux()
@@ -225,33 +236,87 @@ func getBotID() string {
 }
 
 func initDB(db *sql.DB) error {
+	if err := ensureSchemaVersionTable(db); err != nil {
+		return err
+	}
+	migrations := []migration{
+		{version: 1, name: "baseline schema", up: migrateBaseline},
+	}
+	return applyMigrations(db, migrations)
+}
+
+func ensureSchemaVersionTable(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);`)
+	return err
+}
+
+func currentSchemaVersion(db *sql.DB) (int, error) {
+	row := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`)
+	var v int
+	if err := row.Scan(&v); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+func applyMigrations(db *sql.DB, migrations []migration) error {
+	current, err := currentSchemaVersion(db)
+	if err != nil {
+		return err
+	}
+	for _, m := range migrations {
+		if m.version <= current {
+			continue
+		}
+		log.Printf("applying migration %d: %s", m.version, m.name)
+		if err := m.up(db); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, m.version); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateBaseline(db *sql.DB) error {
 	schema := `CREATE TABLE IF NOT EXISTS transcriptions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        filename TEXT UNIQUE NOT NULL,
-        source_path TEXT NOT NULL,
-        transcript_text TEXT NULL,
-        raw_transcript_text TEXT NULL,
-        clean_transcript_text TEXT NULL,
-        translation_text TEXT NULL,
-        status TEXT NOT NULL,
-        last_error TEXT NULL,
-        size_bytes INTEGER NULL,
-        duration_seconds REAL NULL,
-        hash TEXT NULL,
-        duplicate_of TEXT NULL,
-        embedding TEXT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TRIGGER IF NOT EXISTS transcriptions_updated_at
-    AFTER UPDATE ON transcriptions
-    BEGIN
-        UPDATE transcriptions SET updated_at = CURRENT_TIMESTAMP WHERE id = old.id;
-    END;`
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT UNIQUE NOT NULL,
+    source_path TEXT NOT NULL,
+    transcript_text TEXT NULL,
+    raw_transcript_text TEXT NULL,
+    clean_transcript_text TEXT NULL,
+    translation_text TEXT NULL,
+    status TEXT NOT NULL,
+    last_error TEXT NULL,
+    size_bytes INTEGER NULL,
+    duration_seconds REAL NULL,
+    hash TEXT NULL,
+    duplicate_of TEXT NULL,
+    embedding TEXT NULL,
+    requested_model TEXT NULL,
+    requested_mode TEXT NULL,
+    requested_format TEXT NULL,
+    actual_openai_model_used TEXT NULL,
+    diarized_json TEXT NULL,
+    recognized_towns TEXT NULL,
+    normalized_transcript TEXT NULL,
+    call_type TEXT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER IF NOT EXISTS transcriptions_updated_at
+AFTER UPDATE ON transcriptions
+BEGIN
+    UPDATE transcriptions SET updated_at = CURRENT_TIMESTAMP WHERE id = old.id;
+END;`
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
-	// legacy compatibility: ensure columns exist
 	needed := map[string]string{
 		"raw_transcript_text":      "TEXT",
 		"clean_transcript_text":    "TEXT",
@@ -270,54 +335,42 @@ func initDB(db *sql.DB) error {
 		"normalized_transcript":    "TEXT",
 		"call_type":                "TEXT",
 	}
-	rows, err := db.Query("PRAGMA table_info(transcriptions);")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	existing := map[string]struct{}{}
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+	for col, colType := range needed {
+		if err := addColumnIfMissing(db, "transcriptions", col, colType); err != nil {
 			return err
 		}
-		existing[name] = struct{}{}
-	}
-	for col, colType := range needed {
-		if _, ok := existing[col]; !ok {
-			stmt := fmt.Sprintf("ALTER TABLE transcriptions ADD COLUMN %s %s", col, colType)
-			if _, err := db.Exec(stmt); err != nil {
-				return err
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS app_settings (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    default_model TEXT,
-        default_mode TEXT,
-        default_format TEXT,
-        auto_translate INTEGER DEFAULT 0,
-        webhook_endpoints TEXT,
-        preferred_language TEXT,
-        cleanup_prompt TEXT,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, cleanup_prompt) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]', '');
-    `); err != nil {
+id INTEGER PRIMARY KEY CHECK (id = 1),
+default_model TEXT,
+    default_mode TEXT,
+    default_format TEXT,
+    auto_translate INTEGER DEFAULT 0,
+    webhook_endpoints TEXT,
+    preferred_language TEXT,
+    cleanup_prompt TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);`); err != nil {
 		return err
 	}
-	rows, err = db.Query("PRAGMA table_info(app_settings);")
+	if _, err := db.Exec(`INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, cleanup_prompt) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]', '');`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "app_settings", "cleanup_prompt", "TEXT"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE app_settings SET cleanup_prompt = ? WHERE id = 1 AND (cleanup_prompt IS NULL OR cleanup_prompt = '')`, defaultCleanupPrompt); err != nil {
+		return err
+	}
+	return nil
+}
+
+func addColumnIfMissing(db *sql.DB, table, column, colType string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s);", table))
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	hasCleanup := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
@@ -326,19 +379,19 @@ func initDB(db *sql.DB) error {
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
 			return err
 		}
-		if name == "cleanup_prompt" {
-			hasCleanup = true
+		if name == column {
+			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if !hasCleanup {
-		if _, err := db.Exec(`ALTER TABLE app_settings ADD COLUMN cleanup_prompt TEXT`); err != nil {
-			return err
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType)
+	if _, err := db.Exec(stmt); err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "duplicate column name") || strings.Contains(lower, "already exists") {
+			return nil
 		}
-	}
-	if _, err := db.Exec(`UPDATE app_settings SET cleanup_prompt = ? WHERE id = 1 AND (cleanup_prompt IS NULL OR cleanup_prompt = '')`, defaultCleanupPrompt); err != nil {
 		return err
 	}
 	return nil
@@ -421,6 +474,118 @@ func (s *server) worker() {
 		}
 		s.running.Delete(j.filename)
 	}
+}
+
+func (s *server) runStartupSync() {
+	log.Printf("running startup backfill and catch-up")
+	s.backfillRecentFiles()
+	s.catchupPending()
+}
+
+func (s *server) backfillRecentFiles() {
+	entries, err := os.ReadDir(callsDir)
+	if err != nil {
+		log.Printf("backfill scan failed: %v", err)
+		return
+	}
+	cutoff := time.Now().Add(-30 * 24 * time.Hour)
+	opts, err := s.defaultOptions()
+	if err != nil {
+		log.Printf("using default options with error: %v", err)
+	}
+	var inspected, queued int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			continue
+		}
+		inspected++
+		filename := entry.Name()
+		sourcePath := filepath.Join(callsDir, filename)
+		existing, err := s.getTranscription(filename)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("backfill lookup failed for %s: %v", filename, err)
+			continue
+		}
+		if existing == nil {
+			if err := s.markQueued(filename, sourcePath, info.Size(), opts); err != nil {
+				log.Printf("mark queued failed for %s: %v", filename, err)
+			}
+			s.queueJob(filename, false, false, opts)
+			queued++
+			continue
+		}
+		switch existing.Status {
+		case statusDone:
+			continue
+		case statusError:
+			if err := s.markQueued(filename, sourcePath, info.Size(), opts); err != nil {
+				log.Printf("requeue failed for %s: %v", filename, err)
+			}
+			s.queueJob(filename, false, true, opts)
+			queued++
+		}
+	}
+	log.Printf("backfill inspected %d recent files, queued %d", inspected, queued)
+}
+
+func (s *server) catchupPending() {
+	rows, err := s.db.Query(`SELECT filename, status, updated_at FROM transcriptions WHERE status != ?`, statusDone)
+	if err != nil {
+		log.Printf("catch-up query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+	opts, err := s.defaultOptions()
+	if err != nil {
+		log.Printf("using default options with error: %v", err)
+	}
+	var queued int
+	for rows.Next() {
+		var filename, status string
+		var updatedAt time.Time
+		if err := rows.Scan(&filename, &status, &updatedAt); err != nil {
+			continue
+		}
+		sourcePath := filepath.Join(callsDir, filename)
+		exists := fileExists(sourcePath)
+		if !exists {
+			staged := filepath.Join(workDir, filename)
+			exists = fileExists(staged)
+		}
+		if !exists {
+			continue
+		}
+		requeue := false
+		force := false
+		switch status {
+		case statusQueued, statusError:
+			requeue = true
+		case statusProcessing:
+			if time.Since(updatedAt) > processingStaleAfter {
+				requeue = true
+				force = true
+			}
+		}
+		if requeue {
+			var size int64
+			if info, err := os.Stat(sourcePath); err == nil {
+				size = info.Size()
+			}
+			if err := s.markQueued(filename, sourcePath, size, opts); err != nil {
+				log.Printf("catch-up queue update failed for %s: %v", filename, err)
+			}
+			s.queueJob(filename, false, force, opts)
+			queued++
+		}
+	}
+	log.Printf("catch-up queued %d pending jobs", queued)
 }
 
 func (s *server) processFile(j job) error {
@@ -1438,6 +1603,16 @@ func (s *server) getTranscription(filename string) (*transcription, error) {
 	return &t, nil
 }
 
+func (s *server) markQueued(filename, sourcePath string, size int64, opts TranscriptionOptions) error {
+	var sizeVal interface{}
+	if size > 0 {
+		sizeVal = size
+	}
+	_, err := s.db.Exec(`INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format)`, filename, sourcePath, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format)
+	return err
+}
+
 func (s *server) markProcessing(filename, sourcePath string, size int64, opts TranscriptionOptions) error {
 	_, err := s.db.Exec(`INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format`, filename, sourcePath, statusProcessing, size, opts.Model, opts.Mode, opts.Format)
 	return err
@@ -1509,6 +1684,11 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (s *server) updateMetadata(filename string, size int64, duration float64, hash string) error {
