@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,6 +63,7 @@ var (
 	warrenTowns          = []string{"Allamuchy", "Alpha", "Belvidere", "Blairstown", "Franklin", "Frelinghuysen", "Greenwich", "Hackettstown", "Hardwick", "Harmony", "Hope", "Independence", "Knowlton", "Liberty", "Lopatcong", "Mansfield", "Oxford", "Phillipsburg", "Pohatcong", "Washington Boro", "Washington Township", "White"}
 	defaultCleanupPrompt = buildCleanupPrompt()
 	countyByTown         = buildCountyLookup()
+	addressPattern       = regexp.MustCompile(`(?i)(\b\d{3,6}\s+[A-Za-z0-9'\.\s]+\s+(Street|St|Road|Rd|Avenue|Ave|Highway|Hwy|Route|Rt|Lane|Ln|Drive|Dr|Court|Ct|Place|Pl|Way|Pike|Circle|Cir))`)
 )
 
 func buildCleanupPrompt() string {
@@ -180,6 +182,15 @@ type transcriptionResponse struct {
 	AudioURL             string              `json:"audio_url,omitempty"`
 	Tags                 []string            `json:"tags,omitempty"`
 	Segments             []transcriptSegment `json:"segments,omitempty"`
+	Location             *locationGuess      `json:"location,omitempty"`
+}
+
+type locationGuess struct {
+	Label     string  `json:"label,omitempty"`
+	Latitude  float64 `json:"latitude,omitempty"`
+	Longitude float64 `json:"longitude,omitempty"`
+	Precision string  `json:"precision,omitempty"`
+	Source    string  `json:"source,omitempty"`
 }
 
 type tagCount struct {
@@ -192,13 +203,16 @@ type callStats struct {
 	StatusCounts    map[string]int `json:"status_counts"`
 	CallTypeCounts  map[string]int `json:"call_type_counts"`
 	TagCounts       map[string]int `json:"tag_counts"`
+	AgencyCounts    map[string]int `json:"agency_counts"`
+	TownCounts      map[string]int `json:"town_counts"`
 	AvailableWindow string         `json:"window"`
 }
 
 type callListResponse struct {
-	Window string                  `json:"window"`
-	Calls  []transcriptionResponse `json:"calls"`
-	Stats  callStats               `json:"stats"`
+	Window      string                  `json:"window"`
+	Calls       []transcriptionResponse `json:"calls"`
+	Stats       callStats               `json:"stats"`
+	MapboxToken string                  `json:"mapbox_token,omitempty"`
 }
 
 type processJob struct {
@@ -232,16 +246,17 @@ type AppSettings struct {
 }
 
 type server struct {
-	db       *sql.DB
-	queue    *queue.Queue
-	metrics  *metrics.Metrics
-	running  sync.Map // filename -> struct{}
-	client   *http.Client
-	botID    string
-	shutdown chan struct{}
-	cfg      config.Config
-	tz       *time.Location
-	ctx      context.Context
+	db            *sql.DB
+	queue         *queue.Queue
+	metrics       *metrics.Metrics
+	running       sync.Map // filename -> struct{}
+	client        *http.Client
+	botID         string
+	shutdown      chan struct{}
+	cfg           config.Config
+	tz            *time.Location
+	ctx           context.Context
+	locationCache sync.Map
 }
 
 // QueueDebugResponse represents the payload returned from /debug/queue.
@@ -699,12 +714,12 @@ func (s *server) buildJobContext(filename string) (formatting.CallMetadata, stri
 		log.Printf("metadata parse failed for %s: %v", filename, err)
 		meta = formatting.CallMetadata{RawFileName: filename, DateTime: time.Now().In(s.tz)}
 	}
-	pretty := formatting.FormatPrettyTitle(filename, time.Now(), s.tz)
+	pretty := formatting.FormatPrettyTitle(filename, meta.DateTime, s.tz)
 	return meta, pretty, s.publicURL(filename)
 }
 
 func (s *server) publicURL(filename string) string {
-	return fmt.Sprintf("https://calls.sussexcountyalerts.com/%s", url.PathEscape(filename))
+	return fmt.Sprintf("https://ui.sussexcountyalerts.com/%s", url.PathEscape(filename))
 }
 
 func (s *server) processFile(ctx context.Context, j processJob) error {
@@ -1696,8 +1711,8 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	cutoff := time.Now().Add(-windowDuration)
 
 	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, created_at, updated_at FROM transcriptions`
-	where := []string{"(call_timestamp >= ? OR (call_timestamp IS NULL AND updated_at >= ?))"}
-	args := []interface{}{cutoff, cutoff}
+	where := []string{"COALESCE(call_timestamp, created_at) >= ?"}
+	args := []interface{}{cutoff}
 	if search != "" {
 		like := "%" + strings.ToLower(search) + "%"
 		where = append(where, "(lower(filename) LIKE ? OR lower(coalesce(clean_transcript_text, transcript_text, '')) LIKE ? OR lower(coalesce(raw_transcript_text, '')) LIKE ? OR lower(coalesce(normalized_transcript, '')) LIKE ?)")
@@ -1714,7 +1729,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	if len(where) > 0 {
 		base += " WHERE " + strings.Join(where, " AND ")
 	}
-	base += " ORDER BY COALESCE(call_timestamp, updated_at) DESC LIMIT 500"
+	base += " ORDER BY COALESCE(call_timestamp, created_at) DESC LIMIT 500"
 
 	rows, err := queryWithRetry(s.db, base, args...)
 	if err != nil {
@@ -1735,9 +1750,12 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filtered := make([]transcriptionResponse, 0, len(calls))
-	stats := callStats{StatusCounts: make(map[string]int), CallTypeCounts: make(map[string]int), TagCounts: make(map[string]int), AvailableWindow: windowName}
+	stats := callStats{StatusCounts: make(map[string]int), CallTypeCounts: make(map[string]int), TagCounts: make(map[string]int), AgencyCounts: make(map[string]int), TownCounts: make(map[string]int), AvailableWindow: windowName}
 
 	for _, call := range calls {
+		if call.CallTimestamp.Before(cutoff) {
+			continue
+		}
 		if statusFilter != "" && call.Status != statusFilter {
 			continue
 		}
@@ -1750,6 +1768,12 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 		if call.CallType != nil {
 			stats.CallTypeCounts[strings.ToLower(*call.CallType)]++
 		}
+		if call.Agency != "" {
+			stats.AgencyCounts[strings.ToLower(call.Agency)]++
+		}
+		if call.Town != "" {
+			stats.TownCounts[strings.ToLower(call.Town)]++
+		}
 		for _, tag := range call.Tags {
 			normalized := strings.ToLower(strings.TrimSpace(tag))
 			if normalized == "" {
@@ -1759,7 +1783,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	respondJSON(w, callListResponse{Window: windowName, Calls: filtered, Stats: stats})
+	respondJSON(w, callListResponse{Window: windowName, Calls: filtered, Stats: stats, MapboxToken: s.cfg.MapboxToken})
 }
 
 func respondJSON(w http.ResponseWriter, v interface{}) {
@@ -2107,6 +2131,8 @@ func (s *server) toResponse(t transcription) transcriptionResponse {
 	}
 	tags = stripVolunteerTags(tags)
 
+	location := s.deriveLocation(t, meta)
+
 	return transcriptionResponse{
 		Filename:             t.Filename,
 		SourcePath:           t.SourcePath,
@@ -2138,6 +2164,137 @@ func (s *server) toResponse(t transcription) transcriptionResponse {
 		AudioURL:             s.publicURL(t.Filename),
 		Tags:                 tags,
 		Segments:             s.buildSegments(t),
+		Location:             location,
+	}
+}
+
+func (s *server) deriveLocation(t transcription, meta formatting.CallMetadata) *locationGuess {
+	token := strings.TrimSpace(s.cfg.MapboxToken)
+	if token == "" {
+		return nil
+	}
+
+	if cached, ok := s.locationCache.Load(t.Filename); ok {
+		if guess, ok := cached.(*locationGuess); ok {
+			return guess
+		}
+	}
+
+	candidates := s.buildLocationCandidates(t, meta)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	for _, candidate := range candidates {
+		if loc := s.geocodeWithMapbox(ctx, token, candidate); loc != nil {
+			s.locationCache.Store(t.Filename, loc)
+			return loc
+		}
+	}
+
+	return nil
+}
+
+func (s *server) buildLocationCandidates(t transcription, meta formatting.CallMetadata) []string {
+	var candidates []string
+	seen := make(map[string]struct{})
+	add := func(value string) {
+		v := strings.TrimSpace(value)
+		if v == "" {
+			return
+		}
+		norm := strings.ToLower(v)
+		if _, exists := seen[norm]; exists {
+			return
+		}
+		seen[norm] = struct{}{}
+		candidates = append(candidates, v)
+	}
+
+	transcripts := []string{}
+	if t.NormalizedTranscript != nil {
+		transcripts = append(transcripts, *t.NormalizedTranscript)
+	}
+	if t.CleanTranscript != nil {
+		transcripts = append(transcripts, *t.CleanTranscript)
+	}
+	if t.RawTranscript != nil {
+		transcripts = append(transcripts, *t.RawTranscript)
+	}
+	for _, text := range transcripts {
+		if match := addressPattern.FindString(text); match != "" {
+			add(match + " Sussex County NJ")
+		}
+	}
+
+	recognized := parseRecognizedTownList(t.RecognizedTowns)
+	for _, town := range recognized {
+		add(fmt.Sprintf("%s, NJ", town))
+	}
+	if meta.TownDisplay != "" {
+		add(fmt.Sprintf("%s, NJ", meta.TownDisplay))
+	}
+	if meta.AgencyDisplay != "" {
+		add(fmt.Sprintf("%s, NJ", meta.AgencyDisplay))
+	}
+	add("Sussex County, NJ")
+
+	return candidates
+}
+
+func (s *server) geocodeWithMapbox(ctx context.Context, token, query string) *locationGuess {
+	encoded := url.PathEscape(query)
+	endpoint := fmt.Sprintf("https://api.mapbox.com/geocoding/v5/mapbox.places/%s.json?access_token=%s&autocomplete=true&limit=1&country=US&language=en&proximity=-74.696,41.05", encoded, token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		log.Printf("mapbox request build failed: %v", err)
+		return nil
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		log.Printf("mapbox request failed: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("mapbox response %d for %s", resp.StatusCode, query)
+		return nil
+	}
+
+	var payload struct {
+		Features []struct {
+			PlaceName string    `json:"place_name"`
+			Center    []float64 `json:"center"`
+			PlaceType []string  `json:"place_type"`
+		} `json:"features"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		log.Printf("mapbox decode failed: %v", err)
+		return nil
+	}
+	if len(payload.Features) == 0 {
+		return nil
+	}
+	feature := payload.Features[0]
+	if len(feature.Center) < 2 {
+		return nil
+	}
+
+	precision := ""
+	if len(feature.PlaceType) > 0 {
+		precision = feature.PlaceType[0]
+	}
+
+	return &locationGuess{
+		Label:     feature.PlaceName,
+		Latitude:  feature.Center[1],
+		Longitude: feature.Center[0],
+		Precision: precision,
+		Source:    query,
 	}
 }
 

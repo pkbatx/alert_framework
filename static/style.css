@@ -179,6 +179,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .chart { min-height: 200px; }
+.map-chart { min-height: 320px; border: 1px solid var(--border); border-radius: 12px; }
 
 .tag-row { display: flex; gap: 8px; flex-wrap: wrap; min-height: 38px; }
 
