@@ -542,6 +542,21 @@ func (s *server) queueJob(filename string, sendGroupMe bool, force bool, opts Tr
 	}
 }
 
+func (s *server) queueBackfillJob(filename string, force bool, opts TranscriptionOptions) {
+	if _, exists := s.running.LoadOrStore(filename, struct{}{}); exists && !force {
+		return
+	}
+	for {
+		select {
+		case s.jobs <- job{filename: filename, sendGroupMe: false, force: force, options: opts}:
+			return
+		case <-s.shutdown:
+			s.running.Delete(filename)
+			return
+		}
+	}
+}
+
 func (s *server) worker() {
 	for j := range s.jobs {
 		if err := s.processFile(j); err != nil {
@@ -563,12 +578,16 @@ func (s *server) backfillRecentFiles() {
 		log.Printf("backfill scan failed: %v", err)
 		return
 	}
-	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 	opts, err := s.defaultOptions()
 	if err != nil {
 		log.Printf("using default options with error: %v", err)
 	}
-	var inspected, queued int
+	type fileMeta struct {
+		name    string
+		modTime time.Time
+		size    int64
+	}
+	var files []fileMeta
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -577,11 +596,18 @@ func (s *server) backfillRecentFiles() {
 		if err != nil {
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
-			continue
-		}
+		files = append(files, fileMeta{name: entry.Name(), modTime: info.ModTime(), size: info.Size()})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.After(files[j].modTime)
+	})
+	if len(files) > 200 {
+		files = files[:200]
+	}
+	var inspected, queued int
+	for _, file := range files {
 		inspected++
-		filename := entry.Name()
+		filename := file.name
 		sourcePath := filepath.Join(callsDir, filename)
 		existing, err := s.getTranscription(filename)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -589,10 +615,10 @@ func (s *server) backfillRecentFiles() {
 			continue
 		}
 		if existing == nil {
-			if err := s.markQueued(filename, sourcePath, info.Size(), opts); err != nil {
+			if err := s.markQueued(filename, sourcePath, file.size, opts); err != nil {
 				log.Printf("mark queued failed for %s: %v", filename, err)
 			}
-			s.queueJob(filename, false, false, opts)
+			s.queueBackfillJob(filename, false, opts)
 			queued++
 			continue
 		}
@@ -600,11 +626,13 @@ func (s *server) backfillRecentFiles() {
 		case statusDone:
 			continue
 		case statusError:
-			if err := s.markQueued(filename, sourcePath, info.Size(), opts); err != nil {
+			if err := s.markQueued(filename, sourcePath, file.size, opts); err != nil {
 				log.Printf("requeue failed for %s: %v", filename, err)
 			}
-			s.queueJob(filename, false, true, opts)
+			s.queueBackfillJob(filename, true, opts)
 			queued++
+		case statusQueued, statusProcessing:
+			continue
 		}
 	}
 	log.Printf("backfill inspected %d recent files, queued %d", inspected, queued)
@@ -1645,17 +1673,26 @@ func respondJSON(w http.ResponseWriter, v interface{}) {
 
 func (s *server) loadSettings() (AppSettings, error) {
 	var settings AppSettings
-	var auto int
-	var webhooks string
+	var auto sql.NullInt64
+	var webhooks sql.NullString
+	var defaultModel, defaultMode, defaultFormat sql.NullString
+	var preferredLanguage, cleanupPrompt sql.NullString
 	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
-		return row.Scan(&settings.DefaultModel, &settings.DefaultMode, &settings.DefaultFormat, &auto, &webhooks, &settings.PreferredLanguage, &settings.CleanupPrompt)
+		return row.Scan(&defaultModel, &defaultMode, &defaultFormat, &auto, &webhooks, &preferredLanguage, &cleanupPrompt)
 	}, `SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt FROM app_settings WHERE id=1`); err != nil {
 		return settings, err
 	}
-	settings.AutoTranslate = auto == 1
-	if webhooks != "" {
-		_ = json.Unmarshal([]byte(webhooks), &settings.WebhookEndpoints)
+	settings.DefaultModel = stringFromNull(defaultModel, "gpt-4o-transcribe")
+	settings.DefaultMode = stringFromNull(defaultMode, "transcribe")
+	settings.DefaultFormat = stringFromNull(defaultFormat, "json")
+	settings.PreferredLanguage = stringFromNull(preferredLanguage, "")
+	settings.CleanupPrompt = strings.TrimSpace(stringFromNull(cleanupPrompt, ""))
+	settings.AutoTranslate = auto.Valid && auto.Int64 == 1
+	hooksJSON := stringFromNull(webhooks, "[]")
+	if strings.TrimSpace(hooksJSON) == "" {
+		hooksJSON = "[]"
 	}
+	_ = json.Unmarshal([]byte(hooksJSON), &settings.WebhookEndpoints)
 	if settings.WebhookEndpoints == nil {
 		settings.WebhookEndpoints = []string{}
 	}
@@ -1663,6 +1700,13 @@ func (s *server) loadSettings() (AppSettings, error) {
 		settings.CleanupPrompt = defaultCleanupPrompt
 	}
 	return settings, nil
+}
+
+func stringFromNull(ns sql.NullString, fallback string) string {
+	if ns.Valid {
+		return ns.String
+	}
+	return fallback
 }
 
 func (s *server) saveSettings(settings AppSettings) error {
