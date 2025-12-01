@@ -28,6 +28,7 @@ import (
 
 	"alert_framework/backfill"
 	"alert_framework/config"
+	"alert_framework/metrics"
 	"alert_framework/queue"
 	"github.com/fsnotify/fsnotify"
 	_ "modernc.org/sqlite"
@@ -116,6 +117,9 @@ type processJob struct {
 	sendGroupMe bool
 	force       bool
 	options     TranscriptionOptions
+	meta        CallMetadata
+	prettyTitle string
+	publicURL   string
 }
 
 type TranscriptionOptions struct {
@@ -138,15 +142,15 @@ type AppSettings struct {
 }
 
 type server struct {
-	db                  *sql.DB
-	queue               *queue.Queue
-	running             sync.Map // filename -> struct{}
-	client              *http.Client
-	botID               string
-	shutdown            chan struct{}
-	cfg                 config.Config
-	summaryMu           sync.Mutex
-	lastBackfillSummary backfill.Summary
+	db       *sql.DB
+	queue    *queue.Queue
+	metrics  *metrics.Metrics
+	running  sync.Map // filename -> struct{}
+	client   *http.Client
+	botID    string
+	shutdown chan struct{}
+	cfg      config.Config
+	tz       *time.Location
 }
 
 func (s *server) defaultOptions() (TranscriptionOptions, error) {
@@ -169,6 +173,12 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
+	tz, err := time.LoadLocation("EST5EDT")
+	if err != nil {
+		log.Printf("falling back to local timezone: %v", err)
+		tz = time.Local
+	}
+
 	if err := os.MkdirAll(cfg.CallsDir, 0755); err != nil {
 		log.Fatalf("failed to ensure calls dir: %v", err)
 	}
@@ -181,19 +191,25 @@ func main() {
 		log.Fatalf("init db: %v", err)
 	}
 
+	m := metrics.New()
+
 	s := &server{
 		db:       db,
 		client:   &http.Client{Timeout: 180 * time.Second},
 		botID:    getBotID(cfg),
 		shutdown: make(chan struct{}),
 		cfg:      cfg,
+		metrics:  m,
+		tz:       tz,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	s.queue = queue.New(cfg.JobQueueSize, cfg.WorkerCount, time.Duration(cfg.JobTimeoutSec)*time.Second)
+	s.queue = queue.New(cfg.JobQueueSize, cfg.WorkerCount, time.Duration(cfg.JobTimeoutSec)*time.Second, m)
 	s.queue.Start(ctx)
+	qStats := s.queue.Stats()
+	m.UpdateQueue(qStats.Length, qStats.Capacity, qStats.WorkerCount)
 
 	go s.watch()
 	log.Printf("starting backfill with limit=%d queue_size=%d workers=%d", cfg.BackfillLimit, cfg.JobQueueSize, cfg.WorkerCount)
@@ -524,30 +540,13 @@ func (s *server) watch() {
 }
 
 func (s *server) handleNewFile(filename string) {
-	pretty := s.runPretty(filename)
-	publicURL := fmt.Sprintf("https://calls.sussexcountyalerts.com/%s", url.PathEscape(filename))
-	text := fmt.Sprintf("%s - %s", pretty, publicURL)
+	meta, pretty, publicURL := s.buildJobContext(filename)
+	text := BuildAlertMessage(meta, pretty, publicURL)
 	if err := s.sendGroupMe(text); err != nil {
 		log.Printf("groupme send failed: %v", err)
 	}
 	opts, _ := s.defaultOptions()
 	s.queueJob("watcher", filename, true, false, opts)
-}
-
-func (s *server) runPretty(filename string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "pretty.sh", filename)
-	out, err := cmd.Output()
-	if err != nil {
-		log.Printf("pretty.sh failed: %v", err)
-		return filename
-	}
-	trimmed := strings.TrimSpace(string(out))
-	if trimmed == "" {
-		return filename
-	}
-	return trimmed
 }
 
 func (s *server) queueJob(source, filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) bool {
@@ -559,11 +558,13 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 	if _, exists := s.running.LoadOrStore(filename, struct{}{}); exists && !force {
 		return false, false
 	}
+	meta, pretty, publicURL := s.buildJobContext(filename)
 	job := queue.Job{
-		ID:     filename,
-		Source: source,
+		ID:       filename,
+		FileName: filename,
+		Source:   source,
 		Work: func(ctx context.Context) error {
-			return s.processFile(ctx, processJob{filename: filename, source: source, sendGroupMe: sendGroupMe, force: force, options: opts})
+			return s.processFile(ctx, processJob{filename: filename, source: source, sendGroupMe: sendGroupMe, force: force, options: opts, meta: meta, prettyTitle: pretty, publicURL: publicURL})
 		},
 		OnFinish: func(err error) {
 			s.running.Delete(filename)
@@ -576,6 +577,20 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 		s.running.Delete(filename)
 	}
 	return enqueued, dropped
+}
+
+func (s *server) buildJobContext(filename string) (CallMetadata, string, string) {
+	meta, err := ParseCallMetadataFromFilename(filename, s.tz)
+	if err != nil {
+		log.Printf("metadata parse failed for %s: %v", filename, err)
+		meta = CallMetadata{RawFileName: filename, DateTime: time.Now().In(s.tz)}
+	}
+	pretty := FormatPrettyTitle(filename, time.Now(), s.tz)
+	return meta, pretty, s.publicURL(filename)
+}
+
+func (s *server) publicURL(filename string) string {
+	return fmt.Sprintf("https://calls.sussexcountyalerts.com/%s", url.PathEscape(filename))
 }
 
 func (s *server) ListCandidates(ctx context.Context) ([]backfill.Record, error) {
@@ -621,18 +636,10 @@ func (s *server) ListCandidates(ctx context.Context) ([]backfill.Record, error) 
 }
 
 func (s *server) OnBackfillComplete(summary backfill.Summary) {
-	s.summaryMu.Lock()
-	s.lastBackfillSummary = summary
-	s.summaryMu.Unlock()
+	s.metrics.SetBackfill(summary)
 	if summary.DroppedFull > 0 {
 		log.Printf("backfill dropped %d jobs because queue remained full", summary.DroppedFull)
 	}
-}
-
-func (s *server) getBackfillSummary() backfill.Summary {
-	s.summaryMu.Lock()
-	defer s.summaryMu.Unlock()
-	return s.lastBackfillSummary
 }
 
 func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) (backfill.EnqueueResult, error) {
@@ -672,7 +679,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	var decodeDur, transcribeDur, notifyDur time.Duration
 	status := "success"
 	defer func() {
-		log.Printf("job_source=%s file=%s total=%.2fs decode=%.2fs transcribe=%.2fs notify=%.2fs status=%s", j.source, filename, time.Since(start).Seconds(), decodeDur.Seconds(), transcribeDur.Seconds(), notifyDur.Seconds(), status)
+		log.Printf("job_source=%s file=%s call_type=%s total=%.2fs decode=%.2fs transcribe=%.2fs notify=%.2fs status=%s", j.source, filename, j.meta.CallType, time.Since(start).Seconds(), decodeDur.Seconds(), transcribeDur.Seconds(), notifyDur.Seconds(), status)
 	}()
 
 	var existingEntry *transcription
@@ -742,6 +749,10 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	if callType == nil && existingEntry != nil && existingEntry.CallType != nil {
 		callType = existingEntry.CallType
 	}
+	if callType == nil && j.meta.CallType != "" {
+		ct := j.meta.CallType
+		callType = &ct
+	}
 
 	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType); err != nil {
 		status = err.Error()
@@ -754,10 +765,10 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		}
 	}
 	if j.sendGroupMe {
-		if err := s.fireWebhooks(filename); err != nil {
+		if err := s.fireWebhooks(j); err != nil {
 			log.Printf("webhook error: %v", err)
 		}
-		followup := fmt.Sprintf("%s transcript:\n%s", filename, cleanedTranscript)
+		followup := fmt.Sprintf("%s transcript:\n%s", j.prettyTitle, cleanedTranscript)
 		if err := s.sendGroupMe(followup); err != nil {
 			log.Printf("groupme follow-up failed: %v", err)
 		}
@@ -1318,14 +1329,20 @@ func (s *server) handleReady(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
 	stats := s.queue.Stats()
-	summary := s.getBackfillSummary()
+	s.metrics.UpdateQueue(stats.Length, stats.Capacity, stats.WorkerCount)
+	snapshot := s.metrics.Snapshot()
+	var last interface{}
+	if snapshot.HasBackfillRun {
+		last = snapshot.LastBackfill
+	}
 	respondJSON(w, map[string]interface{}{
-		"length":         stats.Length,
-		"capacity":       stats.Capacity,
-		"workers":        stats.WorkerCount,
-		"processed_jobs": stats.Processed,
-		"failed_jobs":    stats.Failed,
-		"last_backfill":  summary,
+		"length":         snapshot.QueueLength,
+		"capacity":       snapshot.QueueCapacity,
+		"workers":        snapshot.WorkerCount,
+		"processed_jobs": snapshot.ProcessedJobs,
+		"failed_jobs":    snapshot.FailedJobs,
+		"last_backfill":  last,
+		"has_backfill":   snapshot.HasBackfillRun,
 	})
 }
 
@@ -1920,7 +1937,7 @@ func (s *server) storeEmbedding(filename string, embedding []float64) error {
 //	  "summary": {"agency": "...", "town": "...", "address": "...", "call_type": "...", "units_dispatched": "..."},
 //	  "transcript": {"raw": "...", "normalized": "...", "translated": "...", "recognized_towns": ["..."], "model": "gpt-4o-transcribe-diarize", "mode": "transcribe", "format": "json", "call_type": "Fire"}
 //	}
-func (s *server) fireWebhooks(filename string) error {
+func (s *server) fireWebhooks(j processJob) error {
 	settings, err := s.loadSettings()
 	if err != nil {
 		return err
@@ -1928,7 +1945,7 @@ func (s *server) fireWebhooks(filename string) error {
 	if len(settings.WebhookEndpoints) == 0 {
 		return nil
 	}
-	t, err := s.getTranscription(filename)
+	t, err := s.getTranscription(j.filename)
 	if err != nil {
 		return err
 	}
@@ -1956,14 +1973,31 @@ func (s *server) fireWebhooks(filename string) error {
 	if len(recognized) > 0 {
 		town = &recognized[0]
 	}
+	if town == nil && j.meta.TownDisplay != "" {
+		summaryTown := j.meta.TownDisplay
+		town = &summaryTown
+	}
+
+	alertTime := time.Now()
+	if !j.meta.DateTime.IsZero() {
+		alertTime = j.meta.DateTime
+	}
 
 	payload := map[string]interface{}{
-		"timestamp_utc":  time.Now().UTC().Format(time.RFC3339),
-		"local_datetime": time.Now().Local().Format("2006-01-02 15:04:05"),
+		"timestamp_utc":  alertTime.UTC().Format(time.RFC3339),
+		"local_datetime": alertTime.In(s.tz).Format("2006-01-02 15:04:05"),
 		"filename":       t.Filename,
-		"url":            fmt.Sprintf("https://calls.sussexcountyalerts.com/%s", url.PathEscape(t.Filename)),
+		"url":            j.publicURL,
+		"pretty_title":   j.prettyTitle,
+		"alert_message":  BuildAlertMessage(j.meta, j.prettyTitle, j.publicURL),
+		"metadata": map[string]interface{}{
+			"agency":    nullableString(j.meta.AgencyDisplay),
+			"town":      nullableString(j.meta.TownDisplay),
+			"call_type": nullableString(j.meta.CallType),
+			"captured":  alertTime.In(s.tz).Format(time.RFC3339),
+		},
 		"summary": map[string]interface{}{
-			"agency":           nil,
+			"agency":           nullableString(j.meta.AgencyDisplay),
 			"town":             town,
 			"address":          nil,
 			"call_type":        callTypeVal,

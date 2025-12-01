@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"alert_framework/metrics"
 	"context"
 	"errors"
 	"testing"
@@ -11,7 +12,8 @@ func TestStatsTrackProcessedAndFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	q := New(4, 2, time.Second)
+	m := metrics.New()
+	q := New(4, 2, time.Second, m)
 	q.Start(ctx)
 
 	done := make(chan struct{})
@@ -31,11 +33,11 @@ func TestStatsTrackProcessedAndFailures(t *testing.T) {
 		t.Fatalf("failure job did not finish")
 	}
 
-	stats := q.Stats()
-	if stats.Processed < 2 {
-		t.Fatalf("expected processed to be >=2, got %d", stats.Processed)
+	snap := m.Snapshot()
+	if snap.ProcessedJobs < 2 {
+		t.Fatalf("expected processed to be >=2, got %d", snap.ProcessedJobs)
 	}
-	if stats.Failed == 0 {
+	if snap.FailedJobs == 0 {
 		t.Fatalf("expected at least one failure recorded")
 	}
 }
