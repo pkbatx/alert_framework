@@ -162,11 +162,8 @@ func main() {
 		log.Fatalf("failed to ensure work dir: %v", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := openDB()
 	if err != nil {
-		log.Fatalf("open db: %v", err)
-	}
-	if err := initDB(db); err != nil {
 		log.Fatalf("init db: %v", err)
 	}
 
@@ -235,6 +232,83 @@ func getBotID() string {
 	return defaultBot
 }
 
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "database is locked") || strings.Contains(lower, "sqlite_busy")
+}
+
+func withRetry(op func() error) error {
+	const maxAttempts = 8
+	const backoff = 100 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := op(); err != nil {
+			lastErr = err
+			if isSQLiteBusy(err) && attempt < maxAttempts {
+				time.Sleep(backoff)
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func execWithRetry(db *sql.DB, query string, args ...interface{}) (sql.Result, error) {
+	var res sql.Result
+	err := withRetry(func() error {
+		var err error
+		res, err = db.Exec(query, args...)
+		return err
+	})
+	return res, err
+}
+
+func queryWithRetry(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
+	var rows *sql.Rows
+	err := withRetry(func() error {
+		var err error
+		rows, err = db.Query(query, args...)
+		return err
+	})
+	return rows, err
+}
+
+func queryRowWithRetry(db *sql.DB, scan func(*sql.Row) error, query string, args ...interface{}) error {
+	return withRetry(func() error {
+		row := db.QueryRow(query, args...)
+		return scan(row)
+	})
+}
+
+func openDB() (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL;",
+		"PRAGMA busy_timeout=5000;",
+	}
+	for _, pragma := range pragmas {
+		if _, err := execWithRetry(db, pragma); err != nil {
+			log.Printf("db pragma failed (%s): %v", strings.TrimSpace(pragma), err)
+		}
+	}
+
+	if err := initDB(db); err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
 func initDB(db *sql.DB) error {
 	if err := ensureSchemaVersionTable(db); err != nil {
 		return err
@@ -246,7 +320,7 @@ func initDB(db *sql.DB) error {
 }
 
 func ensureSchemaVersionTable(db *sql.DB) error {
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+	_, err := execWithRetry(db, `CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );`)
@@ -254,9 +328,10 @@ func ensureSchemaVersionTable(db *sql.DB) error {
 }
 
 func currentSchemaVersion(db *sql.DB) (int, error) {
-	row := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`)
 	var v int
-	if err := row.Scan(&v); err != nil {
+	if err := queryRowWithRetry(db, func(row *sql.Row) error {
+		return row.Scan(&v)
+	}, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`); err != nil {
 		return 0, err
 	}
 	return v, nil
@@ -275,7 +350,7 @@ func applyMigrations(db *sql.DB, migrations []migration) error {
 		if err := m.up(db); err != nil {
 			return err
 		}
-		if _, err := db.Exec(`INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, m.version); err != nil {
+		if _, err := execWithRetry(db, `INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, m.version); err != nil {
 			return err
 		}
 	}
@@ -314,7 +389,7 @@ AFTER UPDATE ON transcriptions
 BEGIN
     UPDATE transcriptions SET updated_at = CURRENT_TIMESTAMP WHERE id = old.id;
 END;`
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := execWithRetry(db, schema); err != nil {
 		return err
 	}
 	needed := map[string]string{
@@ -340,7 +415,7 @@ END;`
 			return err
 		}
 	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS app_settings (
+	if _, err := execWithRetry(db, `CREATE TABLE IF NOT EXISTS app_settings (
 id INTEGER PRIMARY KEY CHECK (id = 1),
 default_model TEXT,
     default_mode TEXT,
@@ -353,20 +428,20 @@ default_model TEXT,
 );`); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, cleanup_prompt) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]', '');`); err != nil {
+	if _, err := execWithRetry(db, `INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, cleanup_prompt) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]', '');`); err != nil {
 		return err
 	}
 	if err := addColumnIfMissing(db, "app_settings", "cleanup_prompt", "TEXT"); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`UPDATE app_settings SET cleanup_prompt = ? WHERE id = 1 AND (cleanup_prompt IS NULL OR cleanup_prompt = '')`, defaultCleanupPrompt); err != nil {
+	if _, err := execWithRetry(db, `UPDATE app_settings SET cleanup_prompt = ? WHERE id = 1 AND (cleanup_prompt IS NULL OR cleanup_prompt = '')`, defaultCleanupPrompt); err != nil {
 		return err
 	}
 	return nil
 }
 
 func addColumnIfMissing(db *sql.DB, table, column, colType string) error {
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s);", table))
+	rows, err := queryWithRetry(db, fmt.Sprintf("PRAGMA table_info(%s);", table))
 	if err != nil {
 		return err
 	}
@@ -387,7 +462,7 @@ func addColumnIfMissing(db *sql.DB, table, column, colType string) error {
 		return err
 	}
 	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType)
-	if _, err := db.Exec(stmt); err != nil {
+	if _, err := execWithRetry(db, stmt); err != nil {
 		lower := strings.ToLower(err.Error())
 		if strings.Contains(lower, "duplicate column name") || strings.Contains(lower, "already exists") {
 			return nil
@@ -488,7 +563,7 @@ func (s *server) backfillRecentFiles() {
 		log.Printf("backfill scan failed: %v", err)
 		return
 	}
-	cutoff := time.Now().Add(-30 * 24 * time.Hour)
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 	opts, err := s.defaultOptions()
 	if err != nil {
 		log.Printf("using default options with error: %v", err)
@@ -536,7 +611,7 @@ func (s *server) backfillRecentFiles() {
 }
 
 func (s *server) catchupPending() {
-	rows, err := s.db.Query(`SELECT filename, status, updated_at FROM transcriptions WHERE status != ?`, statusDone)
+	rows, err := queryWithRetry(s.db, `SELECT filename, status, updated_at FROM transcriptions WHERE status != ?`, statusDone)
 	if err != nil {
 		log.Printf("catch-up query failed: %v", err)
 		return
@@ -1225,6 +1300,7 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		settings, err := s.loadSettings()
 		if err != nil {
+			log.Printf("load settings failed: %v", err)
 			http.Error(w, "settings error", http.StatusInternalServerError)
 			return
 		}
@@ -1245,6 +1321,7 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			payload.DefaultFormat = "json"
 		}
 		if err := s.saveSettings(payload); err != nil {
+			log.Printf("save settings failed: %v", err)
 			http.Error(w, "save error", http.StatusInternalServerError)
 			return
 		}
@@ -1338,6 +1415,7 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := s.getTranscription(cleaned)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("fetch transcription %s failed: %v", cleaned, err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -1458,8 +1536,9 @@ func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, filename 
 		return
 	}
 
-	rows, err := s.db.Query(`SELECT filename, embedding FROM transcriptions WHERE filename != ? AND embedding IS NOT NULL`, filename)
+	rows, err := queryWithRetry(s.db, `SELECT filename, embedding FROM transcriptions WHERE filename != ? AND embedding IS NOT NULL`, filename)
 	if err != nil {
+		log.Printf("similar query failed for %s: %v", filename, err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -1539,8 +1618,9 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	base += " LIMIT ? OFFSET ?"
 	args = append(args, pageSize, offset)
 
-	rows, err := s.db.Query(base, args...)
+	rows, err := queryWithRetry(s.db, base, args...)
 	if err != nil {
+		log.Printf("transcriptions query failed: %v", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -1564,11 +1644,12 @@ func respondJSON(w http.ResponseWriter, v interface{}) {
 }
 
 func (s *server) loadSettings() (AppSettings, error) {
-	row := s.db.QueryRow(`SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt FROM app_settings WHERE id=1`)
 	var settings AppSettings
 	var auto int
 	var webhooks string
-	if err := row.Scan(&settings.DefaultModel, &settings.DefaultMode, &settings.DefaultFormat, &auto, &webhooks, &settings.PreferredLanguage, &settings.CleanupPrompt); err != nil {
+	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
+		return row.Scan(&settings.DefaultModel, &settings.DefaultMode, &settings.DefaultFormat, &auto, &webhooks, &settings.PreferredLanguage, &settings.CleanupPrompt)
+	}, `SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt FROM app_settings WHERE id=1`); err != nil {
 		return settings, err
 	}
 	settings.AutoTranslate = auto == 1
@@ -1590,14 +1671,15 @@ func (s *server) saveSettings(settings AppSettings) error {
 	if settings.AutoTranslate {
 		auto = 1
 	}
-	_, err := s.db.Exec(`UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, cleanup_prompt=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt)
+	_, err := execWithRetry(s.db, `UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, cleanup_prompt=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt)
 	return err
 }
 
 func (s *server) getTranscription(filename string) (*transcription, error) {
-	row := s.db.QueryRow(`SELECT id, filename, source_path, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename)
 	var t transcription
-	if err := row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
+		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt)
+	}, `SELECT id, filename, source_path, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -1608,24 +1690,24 @@ func (s *server) markQueued(filename, sourcePath string, size int64, opts Transc
 	if size > 0 {
 		sizeVal = size
 	}
-	_, err := s.db.Exec(`INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?)
+	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format)`, filename, sourcePath, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format)
 	return err
 }
 
 func (s *server) markProcessing(filename, sourcePath string, size int64, opts TranscriptionOptions) error {
-	_, err := s.db.Exec(`INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format`, filename, sourcePath, statusProcessing, size, opts.Model, opts.Mode, opts.Format)
+	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format`, filename, sourcePath, statusProcessing, size, opts.Model, opts.Mode, opts.Format)
 	return err
 }
 
 func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string, diarized *string, towns *string, normalized *string, actualModel *string, callType *string) error {
-	_, err := s.db.Exec(`UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=? WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, filename)
+	_, err := execWithRetry(s.db, `UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=? WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, filename)
 	return err
 }
 
 func (s *server) markError(filename string, cause error) {
 	msg := cause.Error()
-	if _, err := s.db.Exec(`UPDATE transcriptions SET status=?, last_error=? WHERE filename=?`, statusError, msg, filename); err != nil {
+	if _, err := execWithRetry(s.db, `UPDATE transcriptions SET status=?, last_error=? WHERE filename=?`, statusError, msg, filename); err != nil {
 		log.Printf("failed to mark error: %v", err)
 	}
 }
@@ -1692,7 +1774,7 @@ func fileExists(path string) bool {
 }
 
 func (s *server) updateMetadata(filename string, size int64, duration float64, hash string) error {
-	_, err := s.db.Exec(`UPDATE transcriptions SET size_bytes=?, duration_seconds=?, hash=? WHERE filename=?`, size, duration, hash, filename)
+	_, err := execWithRetry(s.db, `UPDATE transcriptions SET size_bytes=?, duration_seconds=?, hash=? WHERE filename=?`, size, duration, hash, filename)
 	return err
 }
 
@@ -1700,9 +1782,10 @@ func (s *server) findDuplicate(hash string, filename string) string {
 	if hash == "" {
 		return ""
 	}
-	row := s.db.QueryRow(`SELECT filename FROM transcriptions WHERE hash = ? AND filename != ? AND status = ?`, hash, filename, statusDone)
 	var dup string
-	if err := row.Scan(&dup); err == nil {
+	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
+		return row.Scan(&dup)
+	}, `SELECT filename FROM transcriptions WHERE hash = ? AND filename != ? AND status = ?`, hash, filename, statusDone); err == nil {
 		return dup
 	}
 	return ""
@@ -1713,7 +1796,7 @@ func (s *server) copyFromDuplicate(filename, duplicate string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=? WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, filename)
+	_, err = execWithRetry(s.db, `UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=? WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, filename)
 	return err
 }
 
@@ -1737,7 +1820,7 @@ func (s *server) storeEmbedding(filename string, embedding []float64) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE transcriptions SET embedding=? WHERE filename=?`, string(data), filename)
+	_, err = execWithRetry(s.db, `UPDATE transcriptions SET embedding=? WHERE filename=?`, string(data), filename)
 	return err
 }
 
@@ -1829,9 +1912,10 @@ func (s *server) fireWebhooks(filename string) error {
 }
 
 func (s *server) loadEmbedding(filename string) ([]float64, error) {
-	row := s.db.QueryRow(`SELECT embedding FROM transcriptions WHERE filename = ?`, filename)
 	var emb sql.NullString
-	if err := row.Scan(&emb); err != nil {
+	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
+		return row.Scan(&emb)
+	}, `SELECT embedding FROM transcriptions WHERE filename = ?`, filename); err != nil {
 		return nil, err
 	}
 	return parseEmbedding(emb.String)
