@@ -51,7 +51,8 @@ var (
 	allowedExtensions = map[string]struct{}{
 		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
 	}
-	sussexTowns = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
+	sussexTowns          = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
+	defaultCleanupPrompt = "You are cleaning emergency radio transcripts for Sussex County, NJ. Normalize spelling, fix misheard Sussex County town names to the closest from this list: " + strings.Join(sussexTowns, ", ") + ". Return JSON with fields normalized_transcript and recognized_towns (array). Maintain the original meaning and avoid adding new details."
 )
 
 // transcription statuses
@@ -119,6 +120,7 @@ type AppSettings struct {
 	AutoTranslate     bool
 	WebhookEndpoints  []string
 	PreferredLanguage string
+	CleanupPrompt     string
 }
 
 type server struct {
@@ -300,10 +302,37 @@ func initDB(db *sql.DB) error {
         auto_translate INTEGER DEFAULT 0,
         webhook_endpoints TEXT,
         preferred_language TEXT,
+        cleanup_prompt TEXT,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
-    INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]');
+    INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, cleanup_prompt) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]', '');
     `); err != nil {
+		return err
+	}
+	rows, err := db.Query("PRAGMA table_info(app_settings);")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasCleanup := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "cleanup_prompt" {
+			hasCleanup = true
+		}
+	}
+	if !hasCleanup {
+		if _, err := db.Exec(`ALTER TABLE app_settings ADD COLUMN cleanup_prompt TEXT`); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`UPDATE app_settings SET cleanup_prompt = ? WHERE id = 1 AND (cleanup_prompt IS NULL OR cleanup_prompt = '')`, defaultCleanupPrompt); err != nil {
 		return err
 	}
 	return nil
@@ -460,10 +489,10 @@ func (s *server) processFile(j job) error {
 			log.Printf("store embedding: %v", err)
 		}
 	}
-	if err := s.fireWebhooks(filename); err != nil {
-		log.Printf("webhook error: %v", err)
-	}
 	if j.sendGroupMe {
+		if err := s.fireWebhooks(filename); err != nil {
+			log.Printf("webhook error: %v", err)
+		}
 		followup := fmt.Sprintf("%s transcript:\n%s", filename, cleanedTranscript)
 		if err := s.sendGroupMe(followup); err != nil {
 			log.Printf("groupme follow-up failed: %v", err)
@@ -782,7 +811,14 @@ func (s *server) domainCleanup(text string) (string, string, []string, error) {
 	if apiKey == "" {
 		return text, "", nil, errors.New("OPENAI_API_KEY not set")
 	}
-	prompt := fmt.Sprintf("You are cleaning emergency radio transcripts for Sussex County, NJ. Normalize spelling, fix misheard Sussex County town names to the closest from this list: %s. Return JSON with fields normalized_transcript and recognized_towns (array). Maintain meaning.", strings.Join(sussexTowns, ", "))
+	settings, err := s.loadSettings()
+	if err != nil {
+		return text, "", nil, err
+	}
+	prompt := strings.TrimSpace(settings.CleanupPrompt)
+	if prompt == "" {
+		prompt = defaultCleanupPrompt
+	}
 	payload := map[string]interface{}{
 		"model":           "gpt-4.1-mini",
 		"response_format": map[string]string{"type": "json_object"},
@@ -832,7 +868,11 @@ func (s *server) domainCleanup(text string) (string, string, []string, error) {
 	if cleaned == "" {
 		cleaned = text
 	}
-	return cleaned, cleaned, result.RecognizedTowns, nil
+	normalized := result.NormalizedTranscript
+	if normalized == "" {
+		normalized = cleaned
+	}
+	return cleaned, normalized, result.RecognizedTowns, nil
 }
 
 func (s *server) classifyCallType(text string) (*string, error) {
@@ -1104,15 +1144,8 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
-	case len(parts) == 2 && parts[1] == "retranscribe" && r.Method == http.MethodPost:
-		s.queueJob(filename, false, true, opts)
-		respondJSON(w, map[string]string{"status": statusQueued, "filename": filename})
-		return
 	case len(parts) == 2 && parts[1] == "similar" && r.Method == http.MethodGet:
 		s.handleSimilar(w, r, filename)
-		return
-	case len(parts) == 2 && parts[1] == "download" && r.Method == http.MethodGet:
-		s.handleTranscriptDownload(w, r, filename)
 		return
 	}
 
@@ -1238,58 +1271,6 @@ func (s *server) parseOptionsFromRequest(r *http.Request) (TranscriptionOptions,
 	return opts, nil
 }
 
-func (s *server) handleTranscriptDownload(w http.ResponseWriter, r *http.Request, filename string) {
-	t, err := s.getTranscription(filename)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			http.NotFound(w, r)
-			return
-		}
-		http.Error(w, "db error", http.StatusInternalServerError)
-		return
-	}
-	transcript := pickTranscript(t)
-	if transcript == nil {
-		http.Error(w, "transcript missing", http.StatusNotFound)
-		return
-	}
-	format := r.URL.Query().Get("format")
-	if format == "" {
-		format = "txt"
-	}
-	switch format {
-	case "txt":
-		w.Header().Set("Content-Type", "text/plain")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.txt\"", t.Filename))
-		_, _ = w.Write([]byte(*transcript))
-	case "json":
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.json\"", t.Filename))
-		respondJSON(w, map[string]interface{}{"filename": t.Filename, "transcript": transcript})
-	case "srt":
-		w.Header().Set("Content-Type", "application/x-subrip")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.srt\"", t.Filename))
-		srt := buildSimpleSRT(*transcript)
-		_, _ = w.Write([]byte(srt))
-	default:
-		http.Error(w, "unsupported format", http.StatusBadRequest)
-	}
-}
-
-func buildSimpleSRT(text string) string {
-	lines := strings.Split(text, ". ")
-	var sb strings.Builder
-	for i, line := range lines {
-		start := time.Duration(i) * 3 * time.Second
-		end := start + 3*time.Second
-		sb.WriteString(fmt.Sprintf("%d\n%02d:%02d:%02d,000 --> %02d:%02d:%02d,000\n%s\n\n", i+1,
-			int(start.Hours()), int(start.Minutes())%60, int(start.Seconds())%60,
-			int(end.Hours()), int(end.Minutes())%60, int(end.Seconds())%60,
-			strings.TrimSpace(line)))
-	}
-	return sb.String()
-}
-
 func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, filename string) {
 	t, err := s.getTranscription(filename)
 	if err != nil {
@@ -1412,11 +1393,11 @@ func respondJSON(w http.ResponseWriter, v interface{}) {
 }
 
 func (s *server) loadSettings() (AppSettings, error) {
-	row := s.db.QueryRow(`SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language FROM app_settings WHERE id=1`)
+	row := s.db.QueryRow(`SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt FROM app_settings WHERE id=1`)
 	var settings AppSettings
 	var auto int
 	var webhooks string
-	if err := row.Scan(&settings.DefaultModel, &settings.DefaultMode, &settings.DefaultFormat, &auto, &webhooks, &settings.PreferredLanguage); err != nil {
+	if err := row.Scan(&settings.DefaultModel, &settings.DefaultMode, &settings.DefaultFormat, &auto, &webhooks, &settings.PreferredLanguage, &settings.CleanupPrompt); err != nil {
 		return settings, err
 	}
 	settings.AutoTranslate = auto == 1
@@ -1425,6 +1406,9 @@ func (s *server) loadSettings() (AppSettings, error) {
 	}
 	if settings.WebhookEndpoints == nil {
 		settings.WebhookEndpoints = []string{}
+	}
+	if strings.TrimSpace(settings.CleanupPrompt) == "" {
+		settings.CleanupPrompt = defaultCleanupPrompt
 	}
 	return settings, nil
 }
@@ -1435,7 +1419,7 @@ func (s *server) saveSettings(settings AppSettings) error {
 	if settings.AutoTranslate {
 		auto = 1
 	}
-	_, err := s.db.Exec(`UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage)
+	_, err := s.db.Exec(`UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, cleanup_prompt=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt)
 	return err
 }
 
@@ -1470,6 +1454,35 @@ func nullableString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func pointerString(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	if strings.TrimSpace(*s) == "" {
+		return nil
+	}
+	return s
+}
+
+func parseRecognizedTowns(raw *string) []string {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil
+	}
+	var arr []string
+	if err := json.Unmarshal([]byte(*raw), &arr); err == nil {
+		return arr
+	}
+	parts := strings.Split(*raw, ",")
+	var cleaned []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			cleaned = append(cleaned, p)
+		}
+	}
+	return cleaned
 }
 
 func derefString(s *string, fallback string) string {
@@ -1542,6 +1555,17 @@ func (s *server) storeEmbedding(filename string, embedding []float64) error {
 	return err
 }
 
+// fireWebhooks sends a standardized, human-readable payload for watcher-triggered completions.
+// Schema (stable):
+//
+//	{
+//	  "timestamp_utc": "2025-12-01T20:15:34Z",
+//	  "local_datetime": "2025-12-01 15:15:34",
+//	  "filename": "xxxxxxx.mp3",
+//	  "url": "https://calls.sussexcountyalerts.com/<filename>",
+//	  "summary": {"agency": "...", "town": "...", "address": "...", "call_type": "...", "units_dispatched": "..."},
+//	  "transcript": {"raw": "...", "normalized": "...", "translated": "...", "recognized_towns": ["..."], "model": "gpt-4o-transcribe-diarize", "mode": "transcribe", "format": "json", "call_type": "Fire"}
+//	}
 func (s *server) fireWebhooks(filename string) error {
 	settings, err := s.loadSettings()
 	if err != nil {
@@ -1554,18 +1578,53 @@ func (s *server) fireWebhooks(filename string) error {
 	if err != nil {
 		return err
 	}
+
+	recognized := parseRecognizedTowns(t.RecognizedTowns)
+	normalized := pointerString(t.NormalizedTranscript)
+	if normalized == nil {
+		normalized = pointerString(t.CleanTranscript)
+	}
+	if normalized == nil {
+		normalized = pointerString(t.Transcript)
+	}
+	raw := pointerString(t.RawTranscript)
+	if raw == nil {
+		raw = pointerString(t.Transcript)
+	}
+	translated := pointerString(t.Translation)
+
+	model := derefString(t.ActualModel, derefString(t.RequestedModel, ""))
+	mode := derefString(t.RequestedMode, "")
+	format := derefString(t.RequestedFormat, "")
+	callTypeVal := pointerString(t.CallType)
+
+	var town *string
+	if len(recognized) > 0 {
+		town = &recognized[0]
+	}
+
 	payload := map[string]interface{}{
-		"filename":              t.Filename,
-		"transcript_text":       pickTranscript(t),
-		"raw_transcript_text":   t.RawTranscript,
-		"clean_transcript_text": t.CleanTranscript,
-		"translation_text":      t.Translation,
-		"recognized_towns":      t.RecognizedTowns,
-		"normalized_transcript": t.NormalizedTranscript,
-		"call_type":             t.CallType,
-		"requested_model":       t.RequestedModel,
-		"requested_mode":        t.RequestedMode,
-		"requested_format":      t.RequestedFormat,
+		"timestamp_utc":  time.Now().UTC().Format(time.RFC3339),
+		"local_datetime": time.Now().Local().Format("2006-01-02 15:04:05"),
+		"filename":       t.Filename,
+		"url":            fmt.Sprintf("https://calls.sussexcountyalerts.com/%s", url.PathEscape(t.Filename)),
+		"summary": map[string]interface{}{
+			"agency":           nil,
+			"town":             town,
+			"address":          nil,
+			"call_type":        callTypeVal,
+			"units_dispatched": nil,
+		},
+		"transcript": map[string]interface{}{
+			"raw":              raw,
+			"normalized":       normalized,
+			"translated":       translated,
+			"recognized_towns": recognized,
+			"model":            nullableString(model),
+			"mode":             nullableString(mode),
+			"format":           nullableString(format),
+			"call_type":        callTypeVal,
+		},
 	}
 	buf, _ := json.Marshal(payload)
 	for _, endpoint := range settings.WebhookEndpoints {
