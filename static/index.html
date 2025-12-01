@@ -65,13 +65,7 @@
             <p class="muted" id="detail-meta"></p>
             <p class="muted" id="detail-tags"></p>
           </div>
-          <div class="detail-actions">
-            <button id="download-txt" disabled>Download TXT</button>
-            <button id="download-json" disabled>Download JSON</button>
-            <button id="download-srt" disabled>Download SRT</button>
-            <button id="retranscribe" class="secondary" disabled>Retranscribe (no alert)</button>
-            <button id="transcribe-with-options" class="secondary" disabled>Transcribe with options</button>
-          </div>
+          <div class="detail-actions"></div>
         </div>
         <div class="media">
           <audio id="player" controls></audio>
@@ -120,6 +114,9 @@
         <label><input type="checkbox" name="auto_translate" id="setting-auto" /> Auto-translate non-English</label>
         <label>Webhook endpoints (one per line)
           <textarea id="setting-webhooks" rows="3"></textarea>
+        </label>
+        <label>Cleanup Prompt
+          <textarea id="setting-cleanup" rows="6" placeholder="Enter the system prompt used for transcript cleanup and normalization"></textarea>
         </label>
         <button type="submit">Save</button>
         <button type="button" id="close-settings">Close</button>

@@ -16,11 +16,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('sort-by').addEventListener('change', loadList);
   document.getElementById('prev-page').addEventListener('click', () => changePage(-1));
   document.getElementById('next-page').addEventListener('click', () => changePage(1));
-  document.getElementById('download-txt').addEventListener('click', () => download('txt'));
-  document.getElementById('download-json').addEventListener('click', () => download('json'));
-  document.getElementById('download-srt').addEventListener('click', () => download('srt'));
-  document.getElementById('retranscribe').addEventListener('click', retranscribe);
-  document.getElementById('transcribe-with-options').addEventListener('click', transcribeWithOptions);
   document.getElementById('open-settings').addEventListener('click', showSettings);
   document.getElementById('close-settings').addEventListener('click', hideSettings);
   document.getElementById('settings-form').addEventListener('submit', saveSettings);
@@ -104,19 +99,10 @@ async function selectItem(item) {
   document.getElementById('detail-tags').textContent = tags.join(' • ');
   updateTranscript('clean');
   setActiveTab('clean');
-  enableDownloads(true);
-  document.getElementById('retranscribe').disabled = false;
-  document.getElementById('transcribe-with-options').disabled = false;
   const player = document.getElementById('player');
   player.src = `/${encodeURIComponent(item.filename)}`;
   renderSimilar(item.filename);
   drawWaveform(player);
-}
-
-function enableDownloads(on) {
-  ['download-txt','download-json','download-srt'].forEach(id => {
-    document.getElementById(id).disabled = !on;
-  });
 }
 
 function setupTabs() {
@@ -144,30 +130,6 @@ function updateTranscript(tab) {
   else text = data.clean_transcript_text || data.transcript_text || '';
   if (!text) text = `Status: ${data.status}`;
   pre.textContent = text;
-}
-
-function download(format) {
-  if (!state.selected) return;
-  window.location = `/api/transcription/${encodeURIComponent(state.selected.filename)}/download?format=${format}`;
-}
-
-async function retranscribe() {
-  if (!state.selected) return;
-  await fetch(`/api/transcription/${encodeURIComponent(state.selected.filename)}/retranscribe`, { method: 'POST' });
-  alert('Retranscription queued (no GroupMe alert will be sent).');
-}
-
-async function transcribeWithOptions() {
-  if (!state.selected) return;
-  const model = prompt('Model (whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe, gpt-4o-transcribe-diarize):', 'gpt-4o-transcribe');
-  const mode = prompt('Mode (transcribe/translate):', 'transcribe');
-  const format = prompt('Format:', 'json');
-  const url = new URL(`/api/transcription/${encodeURIComponent(state.selected.filename)}`, window.location.origin);
-  if (model) url.searchParams.set('model', model);
-  if (mode) url.searchParams.set('mode', mode);
-  if (format) url.searchParams.set('format', format);
-  await fetch(url);
-  alert('Transcription queued with options (no GroupMe alert).');
 }
 
 async function renderSimilar(filename) {
@@ -252,6 +214,7 @@ async function loadSettings() {
   document.getElementById('setting-format').value = data.DefaultFormat || 'json';
   document.getElementById('setting-auto').checked = data.AutoTranslate;
   document.getElementById('setting-webhooks').value = (data.WebhookEndpoints || []).join('\n');
+  document.getElementById('setting-cleanup').value = data.CleanupPrompt || '';
 }
 
 async function saveSettings(e) {
@@ -262,6 +225,7 @@ async function saveSettings(e) {
     DefaultFormat: document.getElementById('setting-format').value,
     AutoTranslate: document.getElementById('setting-auto').checked,
     WebhookEndpoints: document.getElementById('setting-webhooks').value.split('\n').map(s => s.trim()).filter(Boolean),
+    CleanupPrompt: document.getElementById('setting-cleanup').value,
   };
   await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
   alert('Settings saved');
