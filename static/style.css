@@ -169,8 +169,13 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .transcript { background: #0c1328; border: 1px solid var(--border); border-radius: 12px; padding: 12px; min-height: 160px; }
 .transcript-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-#transcript-text { white-space: pre-wrap; font-family: "IBM Plex Mono", monospace; color: var(--text); }
-#transcript-text.playing { background: rgba(124,231,255,0.05); }
+.transcript-text { display: flex; flex-direction: column; gap: 6px; font-family: "IBM Plex Mono", monospace; color: var(--text); }
+.transcript-text.playing { background: rgba(124,231,255,0.05); }
+.transcript-segment { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease; }
+.transcript-segment .timestamp { min-width: 60px; color: var(--muted); font-family: "IBM Plex Mono", monospace; }
+.transcript-segment .text { white-space: pre-wrap; }
+.transcript-segment:hover { border-color: var(--accent); }
+.transcript-segment.active { border-color: var(--accent); background: rgba(124,231,255,0.08); }
 
 .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .chart { min-height: 200px; }

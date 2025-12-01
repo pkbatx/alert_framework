@@ -58,67 +58,20 @@ var (
 	allowedExtensions = map[string]struct{}{
 		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
 	}
-	sussexTowns       = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
-	warrenTowns       = []string{"Allamuchy", "Alpha", "Belvidere", "Blairstown", "Franklin", "Frelinghuysen", "Greenwich", "Hackettstown", "Hardwick", "Harmony", "Hope", "Independence", "Knowlton", "Liberty", "Lopatcong", "Mansfield", "Oxford", "Phillipsburg", "Pohatcong", "Washington Boro", "Washington Township", "White"}
-	volunteerAgencies = []string{
-		"Andover Borough Fire Department",
-		"Andover Township Fire Department",
-		"Branchville Hose Company #1",
-		"Byram Township Fire Department",
-		"Fredon Volunteer Fire Company",
-		"Frankford Township Fire Department",
-		"Franklin Fire Department",
-		"Glenwood Pochuck Volunteer Ambulance Corps",
-		"Green Township Volunteer Fire Department",
-		"Hamburg Fire Department",
-		"Hardyston Township Volunteer Fire Department",
-		"Hopatcong Fire Department",
-		"Lafayette Township Volunteer Fire Department",
-		"Montague Volunteer Fire Department",
-		"Newton Fire Department",
-		"Ogdensburg Fire Department",
-		"Sandyston Township Volunteer Fire Department",
-		"Sparta Ambulance Squad",
-		"Sparta Township Fire Department",
-		"Stanhope-Netcong Ambulance Corps",
-		"Stillwater Area Volunteer Fire Company",
-		"Sussex Fire Department",
-		"Vernon Township Ambulance Squad",
-		"Vernon Township Fire Department",
-		"Wantage Township First Aid Squad",
-		"Allamuchy-Green First Aid Squad",
-		"Belvidere Volunteer Fire Company",
-		"Blairstown Ambulance Corps",
-		"Franklin Township Fire Department (Warren)",
-		"Great Meadows Regional EMS",
-		"Hackettstown First Aid and Rescue Squad",
-		"Harmony Township Volunteer Fire Company",
-		"Hope Volunteer Fire Department",
-		"Knowlton Township Volunteer Fire and Rescue",
-		"Liberty Township Volunteer Fire Department",
-		"Mansfield Township Fire Company #1",
-		"Oxford Emergency Squad",
-		"Phillipsburg Emergency Squad",
-		"Pohatcong Township Volunteer Fire Company",
-		"Washington Borough Fire Department",
-		"Washington Township Volunteer Fire Department",
-		"White Township Volunteer Fire Department",
-	}
+	sussexTowns          = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
+	warrenTowns          = []string{"Allamuchy", "Alpha", "Belvidere", "Blairstown", "Franklin", "Frelinghuysen", "Greenwich", "Hackettstown", "Hardwick", "Harmony", "Hope", "Independence", "Knowlton", "Liberty", "Lopatcong", "Mansfield", "Oxford", "Phillipsburg", "Pohatcong", "Washington Boro", "Washington Township", "White"}
 	defaultCleanupPrompt = buildCleanupPrompt()
 	countyByTown         = buildCountyLookup()
-	volunteerTownLookup  = buildVolunteerTownSet()
 )
 
 func buildCleanupPrompt() string {
 	townList := "Sussex County towns: " + strings.Join(sussexTowns, ", ") + "."
 	warrenList := "Warren County towns: " + strings.Join(warrenTowns, ", ") + "."
-	agencies := "Volunteer agencies to recognize: " + strings.Join(volunteerAgencies, "; ") + "."
 	return strings.Join([]string{
 		"You are cleaning emergency radio transcripts for Sussex and Warren County, NJ.",
 		"Normalize spelling and fix misheard town or agency names to the closest match from the lists below.",
 		townList,
 		warrenList,
-		agencies,
 		"Return JSON with fields normalized_transcript and recognized_towns (array). Maintain the original meaning and avoid adding new details.",
 	}, " ")
 }
@@ -132,17 +85,6 @@ func buildCountyLookup() map[string]string {
 		counties[strings.ToLower(town)] = "Warren"
 	}
 	return counties
-}
-
-func buildVolunteerTownSet() map[string]struct{} {
-	lookup := make(map[string]struct{})
-	for _, town := range sussexTowns {
-		lookup[strings.ToLower(town)] = struct{}{}
-	}
-	for _, town := range warrenTowns {
-		lookup[strings.ToLower(town)] = struct{}{}
-	}
-	return lookup
 }
 
 // transcription statuses
@@ -200,36 +142,44 @@ type similar struct {
 	Score    float64 `json:"score"`
 }
 
+type transcriptSegment struct {
+	Start   float64 `json:"start"`
+	End     float64 `json:"end"`
+	Text    string  `json:"text"`
+	Speaker string  `json:"speaker,omitempty"`
+}
+
 type transcriptionResponse struct {
-	Filename             string    `json:"filename"`
-	SourcePath           string    `json:"source_path,omitempty"`
-	Source               string    `json:"source"`
-	Transcript           *string   `json:"transcript_text,omitempty"`
-	RawTranscript        *string   `json:"raw_transcript_text,omitempty"`
-	CleanTranscript      *string   `json:"clean_transcript_text,omitempty"`
-	Translation          *string   `json:"translation_text,omitempty"`
-	Status               string    `json:"status"`
-	LastError            *string   `json:"last_error,omitempty"`
-	SizeBytes            *int64    `json:"size_bytes,omitempty"`
-	DurationSeconds      *float64  `json:"duration_seconds,omitempty"`
-	Hash                 *string   `json:"hash,omitempty"`
-	DuplicateOf          *string   `json:"duplicate_of,omitempty"`
-	RequestedModel       *string   `json:"requested_model,omitempty"`
-	RequestedMode        *string   `json:"requested_mode,omitempty"`
-	RequestedFormat      *string   `json:"requested_format,omitempty"`
-	ActualModel          *string   `json:"actual_model,omitempty"`
-	DiarizedJSON         *string   `json:"diarized_json,omitempty"`
-	RecognizedTowns      []string  `json:"recognized_towns,omitempty"`
-	NormalizedTranscript *string   `json:"normalized_transcript,omitempty"`
-	CallType             *string   `json:"call_type,omitempty"`
-	CallTimestamp        time.Time `json:"call_timestamp"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
-	PrettyTitle          string    `json:"pretty_title,omitempty"`
-	Town                 string    `json:"town,omitempty"`
-	Agency               string    `json:"agency,omitempty"`
-	AudioURL             string    `json:"audio_url,omitempty"`
-	Tags                 []string  `json:"tags,omitempty"`
+	Filename             string              `json:"filename"`
+	SourcePath           string              `json:"source_path,omitempty"`
+	Source               string              `json:"source"`
+	Transcript           *string             `json:"transcript_text,omitempty"`
+	RawTranscript        *string             `json:"raw_transcript_text,omitempty"`
+	CleanTranscript      *string             `json:"clean_transcript_text,omitempty"`
+	Translation          *string             `json:"translation_text,omitempty"`
+	Status               string              `json:"status"`
+	LastError            *string             `json:"last_error,omitempty"`
+	SizeBytes            *int64              `json:"size_bytes,omitempty"`
+	DurationSeconds      *float64            `json:"duration_seconds,omitempty"`
+	Hash                 *string             `json:"hash,omitempty"`
+	DuplicateOf          *string             `json:"duplicate_of,omitempty"`
+	RequestedModel       *string             `json:"requested_model,omitempty"`
+	RequestedMode        *string             `json:"requested_mode,omitempty"`
+	RequestedFormat      *string             `json:"requested_format,omitempty"`
+	ActualModel          *string             `json:"actual_model,omitempty"`
+	DiarizedJSON         *string             `json:"diarized_json,omitempty"`
+	RecognizedTowns      []string            `json:"recognized_towns,omitempty"`
+	NormalizedTranscript *string             `json:"normalized_transcript,omitempty"`
+	CallType             *string             `json:"call_type,omitempty"`
+	CallTimestamp        time.Time           `json:"call_timestamp"`
+	CreatedAt            time.Time           `json:"created_at"`
+	UpdatedAt            time.Time           `json:"updated_at"`
+	PrettyTitle          string              `json:"pretty_title,omitempty"`
+	Town                 string              `json:"town,omitempty"`
+	Agency               string              `json:"agency,omitempty"`
+	AudioURL             string              `json:"audio_url,omitempty"`
+	Tags                 []string            `json:"tags,omitempty"`
+	Segments             []transcriptSegment `json:"segments,omitempty"`
 }
 
 type tagCount struct {
@@ -1825,7 +1775,7 @@ func parseTagFilter(raw string) []string {
 	var tags []string
 	for _, part := range parts {
 		tag := strings.ToLower(strings.TrimSpace(part))
-		if tag != "" {
+		if tag != "" && tag != "volunteer" {
 			tags = append(tags, tag)
 		}
 	}
@@ -1890,6 +1840,17 @@ func normalizeTag(value string) string {
 	return strings.Join(parts, " ")
 }
 
+func stripVolunteerTags(tags []string) []string {
+	filtered := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if strings.EqualFold(strings.TrimSpace(tag), "volunteer") {
+			continue
+		}
+		filtered = append(filtered, tag)
+	}
+	return filtered
+}
+
 func appendIfMissing(list []string, seen map[string]struct{}, value string) []string {
 	value = normalizeTag(value)
 	if value == "" {
@@ -1914,17 +1875,6 @@ func (s *server) deriveCounty(meta formatting.CallMetadata, recognized []string)
 	return ""
 }
 
-func (s *server) isVolunteer(meta formatting.CallMetadata, recognized []string) bool {
-	candidates := []string{meta.TownDisplay, meta.AgencyDisplay}
-	candidates = append(candidates, recognized...)
-	for _, name := range candidates {
-		if _, ok := volunteerTownLookup[strings.ToLower(strings.TrimSpace(name))]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *server) buildTags(meta formatting.CallMetadata, recognized []string, callType *string) []string {
 	seen := make(map[string]struct{})
 	tags := make([]string, 0, 8)
@@ -1941,10 +1891,191 @@ func (s *server) buildTags(meta formatting.CallMetadata, recognized []string, ca
 	if county := s.deriveCounty(meta, recognized); county != "" {
 		tags = appendIfMissing(tags, seen, county+" County")
 	}
-	if s.isVolunteer(meta, recognized) {
-		tags = appendIfMissing(tags, seen, "Volunteer")
-	}
 	return tags
+}
+
+func coerceSpeakerLabel(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		return strings.TrimSpace(fmt.Sprintf("Speaker %d", int(v)))
+	case int:
+		return strings.TrimSpace(fmt.Sprintf("Speaker %d", v))
+	default:
+		return ""
+	}
+}
+
+func sanitizeSegments(segments []transcriptSegment, duration *float64) []transcriptSegment {
+	if len(segments) == 0 {
+		return segments
+	}
+	sort.SliceStable(segments, func(i, j int) bool { return segments[i].Start < segments[j].Start })
+	maxDuration := -1.0
+	if duration != nil {
+		maxDuration = *duration
+	}
+	cleaned := make([]transcriptSegment, 0, len(segments))
+	for _, seg := range segments {
+		text := strings.TrimSpace(seg.Text)
+		if text == "" {
+			continue
+		}
+		seg.Text = text
+		if seg.End <= seg.Start {
+			seg.End = seg.Start + 0.5
+		}
+		if maxDuration > 0 && seg.End > maxDuration {
+			seg.End = maxDuration
+		}
+		cleaned = append(cleaned, seg)
+	}
+	return cleaned
+}
+
+func splitIntoSentences(text string) []string {
+	var sentences []string
+	var buf strings.Builder
+	flush := func() {
+		sentence := strings.TrimSpace(buf.String())
+		if sentence != "" {
+			sentences = append(sentences, sentence)
+		}
+		buf.Reset()
+	}
+	for _, r := range text {
+		buf.WriteRune(r)
+		switch r {
+		case '.', '!', '?', '\n':
+			flush()
+		}
+	}
+	flush()
+	return sentences
+}
+
+func fallbackSegmentsFromTranscript(text string, duration *float64) []transcriptSegment {
+	cleaned := strings.TrimSpace(text)
+	if cleaned == "" {
+		return nil
+	}
+	sentences := splitIntoSentences(cleaned)
+	if len(sentences) == 0 {
+		sentences = []string{cleaned}
+	}
+	dur := 0.0
+	if duration != nil {
+		dur = *duration
+	}
+	if dur <= 0 {
+		wordCount := len(strings.Fields(cleaned))
+		dur = math.Max(1, float64(wordCount)*0.5)
+	}
+	step := dur / float64(len(sentences))
+	segments := make([]transcriptSegment, 0, len(sentences))
+	current := 0.0
+	for i, sentence := range sentences {
+		end := current + step
+		if i == len(sentences)-1 {
+			end = dur
+		}
+		segments = append(segments, transcriptSegment{Start: current, End: end, Text: sentence})
+		current = end
+	}
+	return sanitizeSegments(segments, duration)
+}
+
+func parseSegmentsFromDiarized(raw string) []transcriptSegment {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	type word struct {
+		Start   float64     `json:"start"`
+		End     float64     `json:"end"`
+		Word    string      `json:"word"`
+		Speaker interface{} `json:"speaker"`
+		Text    string      `json:"text"`
+	}
+	var payload struct {
+		Duration float64 `json:"duration"`
+		Segments []struct {
+			Start   float64     `json:"start"`
+			End     float64     `json:"end"`
+			Text    string      `json:"text"`
+			Speaker interface{} `json:"speaker"`
+			Words   []word      `json:"words"`
+		} `json:"segments"`
+		Words []word `json:"words"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+	var segments []transcriptSegment
+	for _, seg := range payload.Segments {
+		text := strings.TrimSpace(seg.Text)
+		if text == "" {
+			continue
+		}
+		end := seg.End
+		if end <= seg.Start && len(seg.Words) > 0 {
+			end = seg.Words[len(seg.Words)-1].End
+		}
+		segments = append(segments, transcriptSegment{Start: seg.Start, End: end, Text: text, Speaker: coerceSpeakerLabel(seg.Speaker)})
+	}
+	if len(segments) == 0 && len(payload.Words) > 0 {
+		var current transcriptSegment
+		var buffer []string
+		lastEnd := 0.0
+		for i, w := range payload.Words {
+			text := strings.TrimSpace(w.Word)
+			if text == "" {
+				continue
+			}
+			speaker := coerceSpeakerLabel(w.Speaker)
+			gap := 0.0
+			if len(buffer) > 0 {
+				gap = w.Start - lastEnd
+			}
+			if len(buffer) == 0 || speaker != current.Speaker || gap > 1.5 {
+				if len(buffer) > 0 {
+					current.End = lastEnd
+					current.Text = strings.Join(buffer, " ")
+					segments = append(segments, current)
+				}
+				buffer = []string{text}
+				current = transcriptSegment{Start: w.Start, Speaker: speaker}
+				lastEnd = w.End
+				if i == len(payload.Words)-1 {
+					current.End = lastEnd
+					current.Text = strings.Join(buffer, " ")
+					segments = append(segments, current)
+				}
+				continue
+			}
+			buffer = append(buffer, text)
+			lastEnd = w.End
+			if i == len(payload.Words)-1 {
+				current.End = lastEnd
+				current.Text = strings.Join(buffer, " ")
+				segments = append(segments, current)
+			}
+		}
+	}
+	return sanitizeSegments(segments, &payload.Duration)
+}
+
+func (s *server) buildSegments(t transcription) []transcriptSegment {
+	var transcriptText string
+	if txt := pickTranscript(&t); txt != nil {
+		transcriptText = *txt
+	}
+	if t.DiarizedJSON != nil {
+		if segments := parseSegmentsFromDiarized(*t.DiarizedJSON); len(segments) > 0 {
+			return segments
+		}
+	}
+	return fallbackSegmentsFromTranscript(transcriptText, t.DurationSeconds)
 }
 
 func (s *server) toResponse(t transcription) transcriptionResponse {
@@ -1974,6 +2105,7 @@ func (s *server) toResponse(t transcription) transcriptionResponse {
 	if len(tags) == 0 {
 		tags = s.buildTags(meta, recognized, callType)
 	}
+	tags = stripVolunteerTags(tags)
 
 	return transcriptionResponse{
 		Filename:             t.Filename,
@@ -2005,6 +2137,7 @@ func (s *server) toResponse(t transcription) transcriptionResponse {
 		Agency:               meta.AgencyDisplay,
 		AudioURL:             s.publicURL(t.Filename),
 		Tags:                 tags,
+		Segments:             s.buildSegments(t),
 	}
 }
 
