@@ -147,6 +147,16 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
   transition: border-color 0.15s ease, transform 0.15s ease;
 }
 
+.call-card .card-top { display: flex; justify-content: space-between; gap: 12px; }
+.call-card .card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+.status-icon { font-size: 18px; }
+.status-icon.processing, .status-icon.queued { filter: drop-shadow(0 0 6px rgba(255, 209, 102, 0.6)); }
+.status-icon.done { filter: drop-shadow(0 0 6px rgba(94, 245, 164, 0.6)); }
+.status-icon.error { filter: drop-shadow(0 0 6px rgba(255, 143, 163, 0.6)); }
+.quick-actions { display: flex; align-items: center; gap: 8px; }
+.quick-actions .mini { padding: 6px 10px; border-radius: 8px; }
+.mini { font-size: 13px; }
+
 .call-card:hover { border-color: var(--accent); transform: translateY(-1px); }
 .call-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(124,231,255,0.25); }
 
@@ -182,11 +192,33 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .map-chart { min-height: 320px; border: 1px solid var(--border); border-radius: 12px; }
 
 .tag-row { display: flex; gap: 8px; flex-wrap: wrap; min-height: 38px; }
+.filter-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
+.chip { border: 1px solid var(--border); background: rgba(124,231,255,0.08); color: var(--text); border-radius: 999px; padding: 6px 10px; cursor: pointer; }
+.chip:hover { border-color: var(--accent); }
 
 .empty { color: var(--muted); text-align: center; padding: 20px; }
 .hidden { display: none; }
 
 .checkbox { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 3px solid rgba(124, 231, 255, 0.3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.transcript-placeholder { display: flex; align-items: center; gap: 10px; }
+
+#insights-body.collapsed { display: none; }
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 @media (max-width: 960px) {
   .grid { grid-template-columns: 1fr; }

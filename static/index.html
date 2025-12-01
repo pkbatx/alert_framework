@@ -36,12 +36,34 @@
           <option value="error">Error</option>
         </select>
       </div>
+      <div class="field">
+        <label for="call-type">Call type</label>
+        <select id="call-type">
+          <option value="">Any</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="agency">Agency</label>
+        <select id="agency">
+          <option value="">Any</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="sort">Sort</label>
+        <select id="sort">
+          <option value="recent">Newest first</option>
+          <option value="status">Status</option>
+          <option value="oldest">Oldest first</option>
+        </select>
+      </div>
       <div class="field tag-filter">
         <label>Tags</label>
         <div id="tag-filter" class="tag-row" aria-live="polite"></div>
       </div>
       <button id="refresh" class="ghost">Refresh</button>
     </section>
+
+    <section id="filter-chips" class="filter-chips" aria-live="polite"></section>
 
     <main class="grid">
       <aside class="panel list-panel">
@@ -109,8 +131,10 @@
             <h2>Current window</h2>
             <p class="muted">Small visuals refresh with your filters.</p>
           </div>
+          <button id="toggle-insights" class="ghost" type="button">Collapse</button>
         </div>
-        <div class="chart-grid">
+        <div id="insights-body">
+          <div class="chart-grid">
           <div>
             <h4>Status mix</h4>
             <div id="status-chart" class="chart"></div>
@@ -127,11 +151,12 @@
             <h4>Towns</h4>
             <div id="town-chart" class="chart"></div>
           </div>
-        </div>
-        <div>
-          <h4>Geography</h4>
-          <p class="muted">Best-effort map using recognized towns or transcript addresses.</p>
-          <div id="map-chart" class="chart map-chart"></div>
+          </div>
+          <div>
+            <h4>Geography</h4>
+            <p class="muted">Best-effort map using recognized towns or transcript addresses.</p>
+            <div id="map-chart" class="chart map-chart"></div>
+          </div>
         </div>
       </section>
     </main>
