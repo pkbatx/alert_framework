@@ -3,12 +3,14 @@ const state = {
   filtered: [],
   selected: null,
   activeTab: 'clean',
-  tagFilter: null,
+  tagFilter: '',
+  window: '24h',
+  wave: null,
+  wordCount: 0,
 };
 
 const flags = {
   devMode: document.body.dataset.devMode === 'true',
-  defaultCleanup: document.body.dataset.defaultCleanup || '',
 };
 
 const formatTime = (value) => {
@@ -25,11 +27,6 @@ const debounce = (fn, wait = 250) => {
   };
 };
 
-const renderTags = (tags = []) => {
-  if (!tags.length) return '';
-  return `<div class="tag-row">${tags.map((t) => `<button class="badge tag" data-tag="${t}" type="button">${t}</button>`).join('')}</div>`;
-};
-
 const buildLocationLine = (item) => {
   const pieces = [item.town, item.agency].filter(Boolean);
   return pieces.join(' • ');
@@ -38,19 +35,35 @@ const buildLocationLine = (item) => {
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('search').addEventListener('input', debounce(loadList, 200));
   document.getElementById('status-filter').addEventListener('change', loadList);
-  document.getElementById('source-filter').addEventListener('change', renderList);
+  document.getElementById('tag-filter').addEventListener('change', () => {
+    state.tagFilter = document.getElementById('tag-filter').value;
+    loadList();
+  });
+  document.querySelectorAll('.window-switch .chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.window-switch .chip').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.window = btn.dataset.window;
+      updateWindowCaption();
+      loadList();
+    });
+  });
   document.getElementById('refresh-btn').addEventListener('click', () => { loadList(); loadStatus(); });
   document.getElementById('retry-status').addEventListener('click', loadStatus);
-  document.getElementById('settings-form').addEventListener('submit', saveSettings);
-  document.getElementById('reset-cleanup').addEventListener('click', resetCleanupPrompt);
-  document.getElementById('trigger-backfill').addEventListener('click', runBackfill);
+  document.getElementById('play-toggle').addEventListener('click', togglePlayback);
   setupTabs();
-  setupAdminVisibility();
-  renderTagFilterPill();
   loadList();
   loadStatus();
-  loadSettings();
 });
+
+function updateWindowCaption() {
+  const copy = {
+    '24h': 'Showing the latest 24h by default.',
+    '7d': 'Showing the last 7 days.',
+    '30d': 'Showing the last 30 days.',
+  };
+  document.getElementById('list-caption').textContent = copy[state.window] || copy['24h'];
+}
 
 async function loadList() {
   const search = document.getElementById('search').value.trim();
@@ -58,33 +71,45 @@ async function loadList() {
   const url = new URL('/api/transcriptions', window.location.origin);
   if (search) url.searchParams.set('q', search);
   if (status) url.searchParams.set('status', status);
+  if (state.tagFilter) url.searchParams.set('tag', state.tagFilter);
+  url.searchParams.set('window', state.window || '24h');
   url.searchParams.set('sort', 'time');
   url.searchParams.set('page', '1');
-  url.searchParams.set('page_size', '100');
+  url.searchParams.set('page_size', '150');
   toggleError(false);
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error('request failed');
     state.items = await res.json();
+    renderTagOptions();
     renderList();
+    renderAnalytics();
   } catch (e) {
     toggleError(true);
   }
 }
 
+function renderTagOptions() {
+  const select = document.getElementById('tag-filter');
+  const tags = new Set();
+  state.items.forEach((item) => (item.tags || []).forEach((t) => tags.add(t)));
+  const current = state.tagFilter;
+  select.innerHTML = '<option value="">All tags</option>';
+  Array.from(tags)
+    .sort()
+    .forEach((tag) => {
+      const opt = document.createElement('option');
+      opt.value = tag;
+      opt.textContent = tag;
+      if (tag === current) opt.selected = true;
+      select.appendChild(opt);
+    });
+}
+
 function renderList() {
   const listEl = document.getElementById('list');
   listEl.innerHTML = '';
-  const sourceFilter = document.getElementById('source-filter').value;
-  state.filtered = state.items.filter((item) => {
-    if (sourceFilter && item.source !== sourceFilter) return false;
-    if (state.tagFilter) {
-      const tags = Array.isArray(item.tags) ? item.tags : [];
-      if (!tags.includes(state.tagFilter)) return false;
-    }
-    return true;
-  });
-
+  state.filtered = state.items;
   if (!state.filtered.length) {
     document.getElementById('empty-state').classList.remove('hidden');
     return;
@@ -107,7 +132,6 @@ function renderList() {
         </div>
         <div class="badge-row">
           ${renderStatusBadge(item.status)}
-          ${renderSourceBadge(item.source)}
         </div>
       </div>
       <p class="snippet">${snippet}</p>
@@ -117,14 +141,13 @@ function renderList() {
       </div>
     `;
     card.addEventListener('click', () => selectItem(item));
-    card.querySelectorAll('.badge.tag').forEach((tagBtn) => {
-      tagBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleTagFilter(tagBtn.dataset.tag);
-      });
-    });
     listEl.appendChild(card);
   });
+}
+
+function renderTags(tags = []) {
+  if (!tags || !tags.length) return '';
+  return `<div class="tag-row">${tags.map((t) => `<span class="badge tag">${t}</span>`).join('')}</div>`;
 }
 
 function buildSnippet(item) {
@@ -138,11 +161,6 @@ function renderStatusBadge(status) {
   const cls = `badge status-${status || 'queued'}`;
   const label = status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Queued';
   return `<span class="${cls}">${label}</span>`;
-}
-
-function renderSourceBadge(source) {
-  if (!source) return '';
-  return `<span class="badge source-${source}">${source}</span>`;
 }
 
 async function selectItem(item) {
@@ -159,14 +177,8 @@ async function selectItem(item) {
     document.getElementById('detail-meta').textContent = metaParts.filter(Boolean).join(' • ');
     const location = buildLocationLine(data);
     document.getElementById('detail-location').textContent = location || data.filename;
-    const audioLink = document.getElementById('detail-audio');
-    if (data.audio_url) {
-      audioLink.href = data.audio_url;
-      audioLink.classList.remove('hidden');
-    } else {
-      audioLink.classList.add('hidden');
-    }
     renderBadges(data);
+    setupWaveform(data);
     updateTranscript(state.activeTab);
   } catch (e) {
     document.getElementById('detail-meta').textContent = 'Unable to load transcription details.';
@@ -177,15 +189,8 @@ function renderBadges(data) {
   const wrap = document.getElementById('detail-badges');
   wrap.innerHTML = '';
   wrap.insertAdjacentHTML('beforeend', renderStatusBadge(data.status));
-  wrap.insertAdjacentHTML('beforeend', renderSourceBadge(data.source));
   if (data.call_type) wrap.insertAdjacentHTML('beforeend', `<span class="badge">${data.call_type}</span>`);
-  const recognized = Array.isArray(data.recognized_towns)
-    ? data.recognized_towns
-    : data.recognized_towns
-      ? [data.recognized_towns]
-      : [];
-  const tags = Array.isArray(data.tags) ? data.tags : recognized;
-  const tagHtml = renderTags(tags);
+  const tagHtml = renderTags(data.tags);
   if (tagHtml) {
     wrap.insertAdjacentHTML('beforeend', tagHtml);
   }
@@ -201,162 +206,159 @@ function setupTabs() {
   });
 }
 
-function setActiveTab(tab) {
+function setActiveTab(name) {
   document.querySelectorAll('.transcript-tabs button').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.tab === tab);
+    btn.classList.toggle('active', btn.dataset.tab === name);
   });
 }
 
 function updateTranscript(tab) {
+  if (!state.selected) return;
+  let text = '';
+  if (tab === 'raw') text = state.selected.raw_transcript_text || '';
+  else if (tab === 'translation') text = state.selected.translation_text || '';
+  else text = state.selected.clean_transcript_text || state.selected.transcript_text || '';
   const pre = document.getElementById('transcript-text');
-  const data = state.selected;
-  if (!data) {
-    pre.textContent = 'No call selected.';
+  if (!text) {
+    pre.textContent = 'Transcript not available yet.';
+    state.wordCount = 0;
     return;
   }
-  let text = '';
-  if (tab === 'raw') text = data.raw_transcript_text || data.transcript_text || '';
-  else if (tab === 'translation') text = data.translation_text || 'No translation available yet.';
-  else text = data.clean_transcript_text || data.transcript_text || '';
-  pre.textContent = text || `Status: ${data.status}`;
+  const words = text.split(/(\s+)/);
+  state.wordCount = words.filter((w) => w.trim()).length;
+  const wrapped = words
+    .map((w, idx) => (w.trim() ? `<span class="word" data-idx="${idx}">${w}</span>` : w))
+    .join('');
+  pre.innerHTML = wrapped;
+}
+
+function setupWaveform(data) {
+  const wrap = document.getElementById('wave-wrap');
+  if (!data.audio_url) {
+    wrap.classList.add('hidden');
+    return;
+  }
+  wrap.classList.remove('hidden');
+  const link = document.getElementById('detail-audio');
+  link.href = data.audio_url;
+  if (!state.wave) {
+    state.wave = WaveSurfer.create({
+      container: '#waveform',
+      waveColor: '#5bd0ff',
+      progressColor: '#3fb2e2',
+      height: 72,
+      normalize: true,
+    });
+    state.wave.on('audioprocess', syncHighlight);
+    state.wave.on('seek', syncHighlight);
+  }
+  state.wave.load(data.audio_url);
+}
+
+function togglePlayback() {
+  if (!state.wave) return;
+  state.wave.playPause();
+}
+
+function syncHighlight() {
+  if (!state.wave || !state.selected || state.wordCount === 0) return;
+  const duration = state.wave.getDuration();
+  const position = state.wave.getCurrentTime();
+  const ratio = duration ? position / duration : 0;
+  const words = document.querySelectorAll('#transcript-text .word');
+  const activeCount = Math.floor(words.length * ratio);
+  words.forEach((el, idx) => {
+    el.classList.toggle('active', idx <= activeCount);
+  });
 }
 
 function toggleError(show) {
   document.getElementById('list-error').classList.toggle('hidden', !show);
-  document.getElementById('list').classList.toggle('hidden', show);
-  document.getElementById('empty-state').classList.toggle('hidden', show);
 }
 
 async function loadStatus() {
   try {
     const res = await fetch('/debug/queue');
-    if (!res.ok) throw new Error('status failed');
+    if (!res.ok) throw new Error('bad status');
     const data = await res.json();
-    document.getElementById('queue-level').textContent = data.length ?? '--';
-    document.getElementById('queue-capacity').textContent = `of ${data.capacity ?? '--'}`;
-    document.getElementById('worker-count').textContent = data.workers ?? '--';
-    document.getElementById('stat-queue').textContent = `${data.length ?? 0}`;
-    document.getElementById('stat-capacity').textContent = data.capacity ?? '--';
-    document.getElementById('stat-workers').textContent = data.workers ?? '--';
-    document.getElementById('stat-processed').textContent = data.processed_jobs ?? '--';
-    document.getElementById('stat-failed').textContent = data.failed_jobs ?? '--';
-    renderViz(data);
-    renderBackfill(data.has_backfill ? data.last_backfill : null, data.backfill_running);
+    document.getElementById('queue-level').textContent = data.length;
+    document.getElementById('queue-capacity').textContent = `/ ${data.capacity}`;
+    document.getElementById('worker-count').textContent = data.workers;
+    document.getElementById('stat-processed').textContent = data.processed_jobs;
   } catch (e) {
-    document.getElementById('backfill-caption').textContent = 'Unable to load status right now.';
+    document.getElementById('queue-level').textContent = '--';
   }
 }
 
-function renderViz(data) {
-  const capacity = Number(data.capacity) || 0;
-  const length = Number(data.length) || 0;
-  const processed = Number(data.processed_jobs) || 0;
-  const failed = Number(data.failed_jobs) || 0;
-  const queuePct = capacity > 0 ? Math.min(100, Math.round((length / capacity) * 100)) : 0;
-  const successDenom = processed + failed;
-  const successPct = successDenom > 0 ? Math.round(((processed - failed) / successDenom) * 100) : 0;
-
-  document.getElementById('viz-queue-label').textContent = capacity ? `${queuePct}% full` : '--';
-  document.getElementById('viz-success-label').textContent = successDenom ? `${successPct}% success` : '--';
-  document.getElementById('viz-queue').style.width = `${queuePct}%`;
-  document.getElementById('viz-success').style.width = `${Math.max(0, Math.min(100, successPct))}%`;
+function renderAnalytics() {
+  renderTagCloud();
+  renderStatusPlot();
+  renderTagPlot();
 }
 
-function renderBackfill(summary, busy = false) {
-  const btn = document.getElementById('trigger-backfill');
-  btn.disabled = !!busy;
-  document.getElementById('backfill-hint').textContent = busy ? 'Backfill running…' : 'Runs up to the configured backfill limit.';
-  if (!summary) {
-    document.getElementById('backfill-caption').textContent = 'No runs yet.';
+function renderTagCloud() {
+  const container = document.getElementById('tag-cloud');
+  container.innerHTML = '';
+  const tags = new Map();
+  state.filtered.forEach((item) => {
+    (item.tags || []).forEach((tag) => {
+      tags.set(tag, (tags.get(tag) || 0) + 1);
+    });
+  });
+  Array.from(tags.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .forEach(([tag, count]) => {
+      const chip = document.createElement('button');
+      chip.className = 'chip ghost';
+      chip.textContent = `${tag} (${count})`;
+      chip.addEventListener('click', () => {
+        state.tagFilter = tag;
+        document.getElementById('tag-filter').value = tag;
+        loadList();
+      });
+      container.appendChild(chip);
+    });
+}
+
+function renderStatusPlot() {
+  if (typeof Plotly === 'undefined') return;
+  const counts = {};
+  state.filtered.forEach((item) => {
+    counts[item.status || 'queued'] = (counts[item.status || 'queued'] || 0) + 1;
+  });
+  const labels = Object.keys(counts);
+  const values = labels.map((l) => counts[l]);
+  Plotly.newPlot('plot-status', [{ type: 'bar', x: labels, y: values, marker: { color: '#5bd0ff' } }], {
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    margin: { t: 10, b: 30, l: 30, r: 10 },
+    xaxis: { title: 'Status' },
+    yaxis: { title: 'Count' },
+    font: { color: '#e8edf7' },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function renderTagPlot() {
+  if (typeof Plotly === 'undefined') return;
+  const counts = {};
+  state.filtered.forEach((item) => {
+    (item.tags || []).forEach((tag) => {
+      counts[tag] = (counts[tag] || 0) + 1;
+    });
+  });
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  if (!entries.length) {
+    Plotly.purge('plot-tags');
     return;
   }
-  document.getElementById('backfill-caption').textContent = `${summary.selected || 0} selected • ${summary.enqueued || 0} enqueued`;
-  document.getElementById('bf-selected').textContent = summary.selected ?? '--';
-  document.getElementById('bf-enqueued').textContent = summary.enqueued ?? '--';
-  document.getElementById('bf-dropped').textContent = summary.dropped_full ?? '--';
-  document.getElementById('bf-errors').textContent = summary.other_errors ?? '--';
-  document.getElementById('bf-processed').textContent = summary.already_processed ?? '--';
-  document.getElementById('bf-unprocessed').textContent = summary.unprocessed ?? '--';
-}
-
-async function runBackfill() {
-  const btn = document.getElementById('trigger-backfill');
-  btn.disabled = true;
-  document.getElementById('backfill-hint').textContent = 'Starting backfill…';
-  try {
-    const res = await fetch('/api/backfill', { method: 'POST' });
-    if (!res.ok) throw new Error('failed');
-    const data = await res.json();
-    if (data.status === 'busy') {
-      document.getElementById('backfill-hint').textContent = 'Backfill already running.';
-    } else {
-      document.getElementById('backfill-hint').textContent = 'Backfill started.';
-      setTimeout(loadStatus, 500);
-    }
-  } catch (e) {
-    document.getElementById('backfill-hint').textContent = 'Unable to start backfill right now.';
-  }
-}
-
-async function loadSettings() {
-  try {
-    const res = await fetch('/api/settings');
-    if (!res.ok) return;
-    const data = await res.json();
-    document.getElementById('setting-model').value = data.DefaultModel || 'gpt-4o-transcribe';
-    document.getElementById('setting-mode').value = data.DefaultMode || 'transcribe';
-    document.getElementById('setting-format').value = data.DefaultFormat || 'json';
-    document.getElementById('setting-auto').checked = !!data.AutoTranslate;
-    document.getElementById('setting-webhooks').value = (data.WebhookEndpoints || []).join('\n');
-    document.getElementById('setting-cleanup').value = data.CleanupPrompt || flags.defaultCleanup;
-  } catch (e) {
-    document.getElementById('setting-cleanup').value = flags.defaultCleanup;
-  }
-}
-
-function resetCleanupPrompt() {
-  document.getElementById('setting-cleanup').value = flags.defaultCleanup;
-}
-
-async function saveSettings(e) {
-  e.preventDefault();
-  const payload = {
-    DefaultModel: document.getElementById('setting-model').value,
-    DefaultMode: document.getElementById('setting-mode').value,
-    DefaultFormat: document.getElementById('setting-format').value,
-    AutoTranslate: document.getElementById('setting-auto').checked,
-    WebhookEndpoints: document.getElementById('setting-webhooks').value.split('\n').map((v) => v.trim()).filter(Boolean),
-    CleanupPrompt: document.getElementById('setting-cleanup').value || flags.defaultCleanup,
-  };
-  await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-}
-
-function toggleTagFilter(tag) {
-  state.tagFilter = state.tagFilter === tag ? null : tag;
-  renderTagFilterPill();
-  renderList();
-}
-
-function renderTagFilterPill() {
-  const pill = document.getElementById('active-tag-filter');
-  const hint = document.getElementById('active-tag-hint');
-  if (state.tagFilter) {
-    pill.textContent = `Filtering by tag: ${state.tagFilter}`;
-    pill.className = 'badge tag';
-    pill.onclick = () => toggleTagFilter(state.tagFilter);
-    hint.classList.remove('hidden');
-  } else {
-    pill.textContent = '';
-    pill.className = 'hidden';
-    pill.onclick = null;
-    hint.classList.add('hidden');
-  }
-}
-
-function setupAdminVisibility() {
-  if (flags.devMode) return;
-  document.querySelectorAll('.admin-only').forEach((el) => {
-    el.classList.add('hidden');
-    el.setAttribute('aria-hidden', 'true');
-  });
+  const labels = entries.map((e) => e[0]);
+  const values = entries.map((e) => e[1]);
+  Plotly.newPlot('plot-tags', [{ type: 'pie', labels, values, hole: 0.55 }], {
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    margin: { t: 0, b: 0, l: 0, r: 0 },
+    font: { color: '#e8edf7' },
+    showlegend: true,
+  }, { displayModeBar: false, responsive: true });
 }
