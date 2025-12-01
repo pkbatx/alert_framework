@@ -164,6 +164,7 @@ button.ghost { background: transparent; border-color: var(--border); }
 .backfill-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin: 0; }
 .backfill-grid dt { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
 .backfill-grid dd { margin: 0; font-weight: 700; }
+.backfill-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 
 .settings-grid { display: grid; gap: 10px; }
 .settings-grid select, .settings-grid textarea, .settings-grid input[type="checkbox"] { width: 100%; }
