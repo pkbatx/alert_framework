@@ -26,6 +26,7 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('refresh-btn').addEventListener('click', () => { loadList(); loadStatus(); });
   document.getElementById('retry-status').addEventListener('click', loadStatus);
   document.getElementById('settings-form').addEventListener('submit', saveSettings);
+  document.getElementById('trigger-backfill').addEventListener('click', runBackfill);
   setupTabs();
   loadList();
   loadStatus();
@@ -183,13 +184,16 @@ async function loadStatus() {
     document.getElementById('stat-workers').textContent = data.workers ?? '--';
     document.getElementById('stat-processed').textContent = data.processed_jobs ?? '--';
     document.getElementById('stat-failed').textContent = data.failed_jobs ?? '--';
-    renderBackfill(data.has_backfill ? data.last_backfill : null);
+    renderBackfill(data.has_backfill ? data.last_backfill : null, data.backfill_running);
   } catch (e) {
     document.getElementById('backfill-caption').textContent = 'Unable to load status right now.';
   }
 }
 
-function renderBackfill(summary) {
+function renderBackfill(summary, busy = false) {
+  const btn = document.getElementById('trigger-backfill');
+  btn.disabled = !!busy;
+  document.getElementById('backfill-hint').textContent = busy ? 'Backfill running…' : 'Runs up to the configured backfill limit.';
   if (!summary) {
     document.getElementById('backfill-caption').textContent = 'No runs yet.';
     return;
@@ -201,6 +205,25 @@ function renderBackfill(summary) {
   document.getElementById('bf-errors').textContent = summary.other_errors ?? '--';
   document.getElementById('bf-processed').textContent = summary.already_processed ?? '--';
   document.getElementById('bf-unprocessed').textContent = summary.unprocessed ?? '--';
+}
+
+async function runBackfill() {
+  const btn = document.getElementById('trigger-backfill');
+  btn.disabled = true;
+  document.getElementById('backfill-hint').textContent = 'Starting backfill…';
+  try {
+    const res = await fetch('/api/backfill', { method: 'POST' });
+    if (!res.ok) throw new Error('failed');
+    const data = await res.json();
+    if (data.status === 'busy') {
+      document.getElementById('backfill-hint').textContent = 'Backfill already running.';
+    } else {
+      document.getElementById('backfill-hint').textContent = 'Backfill started.';
+      setTimeout(loadStatus, 500);
+    }
+  } catch (e) {
+    document.getElementById('backfill-hint').textContent = 'Unable to start backfill right now.';
+  }
 }
 
 async function loadSettings() {

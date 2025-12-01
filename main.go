@@ -42,6 +42,10 @@ const (
 	dbPath     = workDir + "/transcriptions.db"
 	groupmeURL = "https://api.groupme.com/v3/bots/post"
 	defaultBot = "03926cdc985a046b27d6393ba6"
+
+	defaultTranscriptionModel  = "gpt-4o-transcribe"
+	defaultTranscriptionMode   = "transcribe"
+	defaultTranscriptionFormat = "json"
 )
 
 var (
@@ -50,6 +54,7 @@ var (
 		"gpt-4o-mini-transcribe":    {"json", "text"},
 		"gpt-4o-transcribe":         {"json", "text"},
 		"gpt-4o-transcribe-diarize": {"json", "text", "diarized_json"},
+		"gpt4-trasncribe":           {"json", "text"},
 	}
 	allowedExtensions = map[string]struct{}{
 		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
@@ -151,6 +156,10 @@ type server struct {
 	shutdown chan struct{}
 	cfg      config.Config
 	tz       *time.Location
+	ctx      context.Context
+
+	backfillMu      sync.Mutex
+	backfillRunning bool
 }
 
 // QueueDebugResponse represents the payload returned from /debug/queue.
@@ -162,12 +171,13 @@ type QueueDebugResponse struct {
 	FailedJobs    int64                 `json:"failed_jobs"`
 	LastBackfill  metrics.BackfillStats `json:"last_backfill"`
 	HasBackfill   bool                  `json:"has_backfill"`
+	BackfillBusy  bool                  `json:"backfill_running"`
 }
 
 func (s *server) defaultOptions() (TranscriptionOptions, error) {
 	settings, err := s.loadSettings()
 	if err != nil {
-		return TranscriptionOptions{Model: "gpt-4o-transcribe", Mode: "transcribe", Format: "json"}, err
+		return TranscriptionOptions{Model: defaultTranscriptionModel, Mode: defaultTranscriptionMode, Format: defaultTranscriptionFormat}, err
 	}
 	return TranscriptionOptions{
 		Model:         settings.DefaultModel,
@@ -212,6 +222,7 @@ func main() {
 		cfg:      cfg,
 		metrics:  m,
 		tz:       tz,
+		ctx:      ctx,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -224,13 +235,14 @@ func main() {
 
 	go s.watch()
 	log.Printf("starting backfill with limit=%d queue_size=%d workers=%d", cfg.BackfillLimit, cfg.JobQueueSize, cfg.WorkerCount)
-	backfill.Run(ctx, s, cfg.BackfillLimit)
+	s.startBackfill(cfg.BackfillLimit)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/transcriptions", s.handleTranscriptions)
 	mux.HandleFunc("/api/transcription/", s.handleTranscription)
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/backfill", s.handleBackfill)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/debug/queue", s.handleDebugQueue)
@@ -651,6 +663,32 @@ func (s *server) OnBackfillComplete(summary backfill.Summary) {
 	if summary.DroppedFull > 0 {
 		log.Printf("backfill dropped %d jobs because queue remained full", summary.DroppedFull)
 	}
+	s.backfillMu.Lock()
+	s.backfillRunning = false
+	s.backfillMu.Unlock()
+}
+
+func (s *server) startBackfill(limit int) bool {
+	s.backfillMu.Lock()
+	if s.backfillRunning {
+		s.backfillMu.Unlock()
+		return false
+	}
+	s.backfillRunning = true
+	s.backfillMu.Unlock()
+
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	backfill.Run(ctx, s, limit)
+	return true
+}
+
+func (s *server) isBackfillRunning() bool {
+	s.backfillMu.Lock()
+	defer s.backfillMu.Unlock()
+	return s.backfillRunning
 }
 
 func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) (backfill.EnqueueResult, error) {
@@ -1350,6 +1388,7 @@ func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
 		FailedJobs:    snapshot.FailedJobs,
 		LastBackfill:  snapshot.LastBackfill,
 		HasBackfill:   snapshot.HasBackfillRun,
+		BackfillBusy:  s.isBackfillRunning(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1418,6 +1457,26 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *server) handleBackfill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+
+	limit := s.cfg.BackfillLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	started := s.startBackfill(limit)
+	if !started {
+		respondJSON(w, map[string]string{"status": "busy"})
+		return
+	}
+	respondJSON(w, map[string]interface{}{"status": "started", "limit": limit})
 }
 
 func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -1741,11 +1800,17 @@ func (s *server) loadSettings() (AppSettings, error) {
 	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
 		return row.Scan(&defaultModel, &defaultMode, &defaultFormat, &auto, &webhooks, &preferredLanguage, &cleanupPrompt)
 	}, `SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt FROM app_settings WHERE id=1`); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := s.ensureSettingsRow(); err != nil {
+				return settings, err
+			}
+			return s.loadSettings()
+		}
 		return settings, err
 	}
-	settings.DefaultModel = fallbackEmpty(stringFromNull(defaultModel, "gpt-4o-transcribe"), "gpt-4o-transcribe")
-	settings.DefaultMode = fallbackEmpty(stringFromNull(defaultMode, "transcribe"), "transcribe")
-	settings.DefaultFormat = fallbackEmpty(stringFromNull(defaultFormat, "json"), "json")
+	settings.DefaultModel = normalizeModelName(fallbackEmpty(stringFromNull(defaultModel, defaultTranscriptionModel), defaultTranscriptionModel))
+	settings.DefaultMode = fallbackEmpty(stringFromNull(defaultMode, defaultTranscriptionMode), defaultTranscriptionMode)
+	settings.DefaultFormat = fallbackEmpty(stringFromNull(defaultFormat, defaultTranscriptionFormat), defaultTranscriptionFormat)
 	settings.PreferredLanguage = stringFromNull(preferredLanguage, "")
 	settings.CleanupPrompt = strings.TrimSpace(stringFromNull(cleanupPrompt, ""))
 	settings.AutoTranslate = auto.Valid && auto.Int64 == 1
@@ -1760,9 +1825,9 @@ func (s *server) loadSettings() (AppSettings, error) {
 	if strings.TrimSpace(settings.CleanupPrompt) == "" {
 		settings.CleanupPrompt = defaultCleanupPrompt
 	}
-	settings.DefaultModel = fallbackEmpty(settings.DefaultModel, "gpt-4o-transcribe")
-	settings.DefaultMode = fallbackEmpty(settings.DefaultMode, "transcribe")
-	settings.DefaultFormat = fallbackEmpty(settings.DefaultFormat, "json")
+	settings.DefaultModel = normalizeModelName(fallbackEmpty(settings.DefaultModel, defaultTranscriptionModel))
+	settings.DefaultMode = fallbackEmpty(settings.DefaultMode, defaultTranscriptionMode)
+	settings.DefaultFormat = fallbackEmpty(settings.DefaultFormat, defaultTranscriptionFormat)
 	return settings, nil
 }
 
@@ -1780,13 +1845,52 @@ func fallbackEmpty(value, fallback string) string {
 	return value
 }
 
+func normalizeModelName(model string) string {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "gpt4-trasncribe", "gpt4-transcribe", "gpt-4-transcribe", "gpt4o-transcribe":
+		return defaultTranscriptionModel
+	}
+	return model
+}
+
 func (s *server) saveSettings(settings AppSettings) error {
+	if err := s.ensureSettingsRow(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(settings.DefaultModel) == "" {
+		settings.DefaultModel = defaultTranscriptionModel
+	}
+	settings.DefaultModel = normalizeModelName(settings.DefaultModel)
+	if strings.TrimSpace(settings.DefaultMode) == "" {
+		settings.DefaultMode = defaultTranscriptionMode
+	}
+	if strings.TrimSpace(settings.DefaultFormat) == "" {
+		settings.DefaultFormat = defaultTranscriptionFormat
+	}
+	if strings.TrimSpace(settings.CleanupPrompt) == "" {
+		settings.CleanupPrompt = defaultCleanupPrompt
+	}
 	hooks, _ := json.Marshal(settings.WebhookEndpoints)
 	auto := 0
 	if settings.AutoTranslate {
 		auto = 1
 	}
-	_, err := execWithRetry(s.db, `UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, cleanup_prompt=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt)
+	res, err := execWithRetry(s.db, `UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, cleanup_prompt=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err == nil && rows == 0 {
+		_, err = execWithRetry(s.db, `INSERT OR REPLACE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt, updated_at) VALUES(1, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt)
+	}
+	return err
+}
+
+func (s *server) ensureSettingsRow() error {
+	if _, err := execWithRetry(s.db, `INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt) VALUES(1, ?, ?, ?, 0, '[]', '', '')`, defaultTranscriptionModel, defaultTranscriptionMode, defaultTranscriptionFormat); err != nil {
+		return err
+	}
+	_, err := execWithRetry(s.db, `UPDATE app_settings SET cleanup_prompt = COALESCE(NULLIF(cleanup_prompt, ''), ?) WHERE id=1`, defaultCleanupPrompt)
 	return err
 }
 

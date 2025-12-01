@@ -81,6 +81,7 @@ func Run(ctx context.Context, repo Repository, limit int) {
 	go func() {
 		select {
 		case <-ctx.Done():
+			repo.OnBackfillComplete(Summary{})
 			return
 		default:
 		}
@@ -88,6 +89,7 @@ func Run(ctx context.Context, repo Repository, limit int) {
 		records, err := repo.ListCandidates(ctx)
 		if err != nil {
 			log.Printf("backfill list failed: %v", err)
+			repo.OnBackfillComplete(Summary{})
 			return
 		}
 
