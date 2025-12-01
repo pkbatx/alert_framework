@@ -19,6 +19,16 @@ const debounce = (fn, wait = 250) => {
   };
 };
 
+const renderTags = (tags = []) => {
+  if (!tags.length) return '';
+  return `<div class="tag-row">${tags.map((t) => `<span class="badge tag">${t}</span>`).join('')}</div>`;
+};
+
+const buildLocationLine = (item) => {
+  const pieces = [item.town, item.agency].filter(Boolean);
+  return pieces.join(' • ');
+};
+
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('search').addEventListener('input', debounce(loadList, 200));
   document.getElementById('status-filter').addEventListener('change', loadList);
@@ -70,9 +80,15 @@ function renderList() {
     card.className = 'call-card';
     card.role = 'listitem';
     const snippet = buildSnippet(item);
+    const title = item.pretty_title || item.filename;
+    const location = buildLocationLine(item);
     card.innerHTML = `
       <div class="card-header">
-        <div class="filename">${item.filename}</div>
+        <div>
+          <div class="filename">${title}</div>
+          ${location ? `<p class="muted tight">${location}</p>` : ''}
+          ${renderTags(item.tags)}
+        </div>
         <div class="badge-row">
           ${renderStatusBadge(item.status)}
           ${renderSourceBadge(item.source)}
@@ -113,12 +129,21 @@ async function selectItem(item) {
     if (!res.ok) throw new Error('failed');
     const data = await res.json();
     state.selected = data;
-    document.getElementById('detail-title').textContent = data.filename;
+    document.getElementById('detail-title').textContent = data.pretty_title || data.filename;
     const metaParts = [];
     if (data.duration_seconds) metaParts.push(`${data.duration_seconds.toFixed(1)}s`);
     if (data.size_bytes) metaParts.push(`${(data.size_bytes / 1024 / 1024).toFixed(2)} MB`);
     metaParts.push(formatTime(data.updated_at));
     document.getElementById('detail-meta').textContent = metaParts.filter(Boolean).join(' • ');
+    const location = buildLocationLine(data);
+    document.getElementById('detail-location').textContent = location || data.filename;
+    const audioLink = document.getElementById('detail-audio');
+    if (data.audio_url) {
+      audioLink.href = data.audio_url;
+      audioLink.classList.remove('hidden');
+    } else {
+      audioLink.classList.add('hidden');
+    }
     renderBadges(data);
     updateTranscript(state.activeTab);
   } catch (e) {
@@ -132,7 +157,16 @@ function renderBadges(data) {
   wrap.insertAdjacentHTML('beforeend', renderStatusBadge(data.status));
   wrap.insertAdjacentHTML('beforeend', renderSourceBadge(data.source));
   if (data.call_type) wrap.insertAdjacentHTML('beforeend', `<span class="badge">${data.call_type}</span>`);
-  if (data.recognized_towns) wrap.insertAdjacentHTML('beforeend', `<span class="badge">${data.recognized_towns}</span>`);
+  const recognized = Array.isArray(data.recognized_towns)
+    ? data.recognized_towns
+    : data.recognized_towns
+      ? [data.recognized_towns]
+      : [];
+  const tags = Array.isArray(data.tags) ? data.tags : recognized;
+  const tagHtml = renderTags(tags);
+  if (tagHtml) {
+    wrap.insertAdjacentHTML('beforeend', tagHtml);
+  }
 }
 
 function setupTabs() {
