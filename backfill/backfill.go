@@ -26,13 +26,13 @@ const (
 
 // Summary captures backfill execution metrics.
 type Summary struct {
-	TotalCandidates     int `json:"total"`
-	AlreadyProcessed    int `json:"already_processed"`
-	Unprocessed         int `json:"unprocessed"`
-	SelectedForBackfill int `json:"selected"`
-	AttemptedEnqueue    int `json:"attempted_enqueue"`
-	EnqueueSucceeded    int `json:"enqueued"`
-	EnqueueDroppedFull  int `json:"dropped_full"`
+	TotalCandidates  int `json:"total"`
+	AlreadyProcessed int `json:"already_processed"`
+	Unprocessed      int `json:"unprocessed"`
+	Selected         int `json:"selected"`
+	Enqueued         int `json:"enqueued"`
+	DroppedFull      int `json:"dropped_full"`
+	OtherErrors      int `json:"other_errors"`
 }
 
 // EnqueueResult captures queueing outcome for a record.
@@ -44,7 +44,7 @@ type EnqueueResult struct {
 // Repository describes the data source needed for backfill.
 type Repository interface {
 	ListCandidates(ctx context.Context) ([]Record, error)
-	QueueRecord(ctx context.Context, rec Record) EnqueueResult
+	QueueRecord(ctx context.Context, rec Record) (EnqueueResult, error)
 	OnBackfillComplete(summary Summary)
 }
 
@@ -56,6 +56,9 @@ func SelectPending(records []Record, limit int) ([]Record, Summary) {
 	})
 
 	summary := Summary{TotalCandidates: len(records)}
+	if limit < 0 {
+		limit = 0
+	}
 	unprocessed := make([]Record, 0, len(records))
 	for _, r := range records {
 		if r.Status == StatusDone {
@@ -66,10 +69,10 @@ func SelectPending(records []Record, limit int) ([]Record, Summary) {
 	}
 
 	summary.Unprocessed = len(unprocessed)
-	if limit < summary.Unprocessed {
+	if limit > 0 && limit < summary.Unprocessed {
 		unprocessed = unprocessed[:limit]
 	}
-	summary.SelectedForBackfill = len(unprocessed)
+	summary.Selected = len(unprocessed)
 	return unprocessed, summary
 }
 
@@ -89,19 +92,23 @@ func Run(ctx context.Context, repo Repository, limit int) {
 		}
 
 		selected, summary := SelectPending(records, limit)
-		summary.AttemptedEnqueue = len(selected)
 
 		for _, rec := range selected {
-			result := repo.QueueRecord(ctx, rec)
+			result, err := repo.QueueRecord(ctx, rec)
+			if err != nil {
+				log.Printf("backfill enqueue error for %s: %v", rec.Filename, err)
+				summary.OtherErrors++
+				continue
+			}
 			if result.Enqueued {
-				summary.EnqueueSucceeded++
+				summary.Enqueued++
 			}
 			if result.DroppedFull {
-				summary.EnqueueDroppedFull++
+				summary.DroppedFull++
 			}
 		}
 
-		log.Printf("backfill summary: total=%d unprocessed=%d selected=%d enqueued=%d dropped_full=%d already_processed=%d", summary.TotalCandidates, summary.Unprocessed, summary.SelectedForBackfill, summary.EnqueueSucceeded, summary.EnqueueDroppedFull, summary.AlreadyProcessed)
+		log.Printf("backfill summary: total=%d unprocessed=%d selected=%d enqueued=%d dropped_full=%d other_errors=%d already_processed=%d", summary.TotalCandidates, summary.Unprocessed, summary.Selected, summary.Enqueued, summary.DroppedFull, summary.OtherErrors, summary.AlreadyProcessed)
 		repo.OnBackfillComplete(summary)
 	}()
 }

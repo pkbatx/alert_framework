@@ -22,6 +22,7 @@ type Stats struct {
 	Capacity    int
 	WorkerCount int
 	Processed   uint64
+	Failed      uint64
 }
 
 // Queue represents a bounded job queue with a fixed worker pool.
@@ -33,6 +34,7 @@ type Queue struct {
 	mu          sync.RWMutex
 	wg          sync.WaitGroup
 	processed   uint64
+	failed      uint64
 }
 
 // New creates a new Queue with the provided capacity, worker count, and per-job timeout.
@@ -144,6 +146,7 @@ func (q *Queue) Stats() Stats {
 		Capacity:    cap(q.jobs),
 		WorkerCount: q.workerCount,
 		Processed:   atomic.LoadUint64(&q.processed),
+		Failed:      atomic.LoadUint64(&q.failed),
 	}
 }
 
@@ -177,6 +180,9 @@ func (q *Queue) handleJob(ctx context.Context, j Job) {
 		j.OnFinish(err)
 	}
 	atomic.AddUint64(&q.processed, 1)
+	if err != nil {
+		atomic.AddUint64(&q.failed, 1)
+	}
 	status := "success"
 	if err != nil {
 		status = err.Error()

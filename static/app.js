@@ -1,113 +1,143 @@
 const state = {
-  page: 1,
-  pageSize: 25,
   items: [],
+  filtered: [],
   selected: null,
-  theme: localStorage.getItem('theme') || 'dark',
+  activeTab: 'clean'
 };
 
-document.addEventListener('DOMContentLoaded', () => {
-  applyTheme();
-  document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
-  document.getElementById('search').addEventListener('input', debounce(loadList, 250));
+const formatTime = (value) => {
+  if (!value) return '';
+  const d = new Date(value);
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+};
+
+const debounce = (fn, wait = 250) => {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), wait);
+  };
+};
+
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('search').addEventListener('input', debounce(loadList, 200));
   document.getElementById('status-filter').addEventListener('change', loadList);
-  document.getElementById('town-filter').addEventListener('input', debounce(loadList, 250));
-  document.getElementById('calltype-filter').addEventListener('change', loadList);
-  document.getElementById('sort-by').addEventListener('change', loadList);
-  document.getElementById('prev-page').addEventListener('click', () => changePage(-1));
-  document.getElementById('next-page').addEventListener('click', () => changePage(1));
-  document.getElementById('open-settings').addEventListener('click', showSettings);
-  document.getElementById('close-settings').addEventListener('click', hideSettings);
+  document.getElementById('source-filter').addEventListener('change', renderList);
+  document.getElementById('refresh-btn').addEventListener('click', () => { loadList(); loadStatus(); });
+  document.getElementById('retry-status').addEventListener('click', loadStatus);
   document.getElementById('settings-form').addEventListener('submit', saveSettings);
   setupTabs();
   loadList();
+  loadStatus();
   loadSettings();
 });
 
-function applyTheme() {
-  const root = document.documentElement;
-  if (state.theme === 'light') root.classList.add('light');
-  else root.classList.remove('light');
-}
-
-function toggleTheme() {
-  state.theme = state.theme === 'light' ? 'dark' : 'light';
-  localStorage.setItem('theme', state.theme);
-  applyTheme();
-}
-
 async function loadList() {
-  const q = document.getElementById('search').value.trim();
+  const search = document.getElementById('search').value.trim();
   const status = document.getElementById('status-filter').value;
-  const town = document.getElementById('town-filter').value.trim();
-  const callType = document.getElementById('calltype-filter').value;
-  const sort = document.getElementById('sort-by').value;
   const url = new URL('/api/transcriptions', window.location.origin);
-  url.searchParams.set('page', state.page);
-  url.searchParams.set('page_size', state.pageSize);
-  if (q) url.searchParams.set('q', q);
+  if (search) url.searchParams.set('q', search);
   if (status) url.searchParams.set('status', status);
-  if (town) url.searchParams.set('town', town);
-  if (callType) url.searchParams.set('call_type', callType);
-  if (sort) url.searchParams.set('sort', sort === 'time' ? '' : sort);
-  const res = await fetch(url);
-  if (!res.ok) return;
-  const items = await res.json();
-  state.items = items;
-  renderList();
+  url.searchParams.set('sort', 'time');
+  url.searchParams.set('page', '1');
+  url.searchParams.set('page_size', '100');
+  toggleError(false);
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('request failed');
+    state.items = await res.json();
+    renderList();
+  } catch (e) {
+    toggleError(true);
+  }
 }
 
 function renderList() {
-  const container = document.getElementById('items');
-  container.innerHTML = '';
-  state.items.forEach((item) => {
-    const div = document.createElement('div');
-    div.className = 'item';
-    div.innerHTML = `
-      <div>${item.filename}</div>
-      <div><span class="status ${item.status}">${item.status}</span></div>
-      <div>${new Date(item.updated_at).toLocaleString()}</div>
+  const listEl = document.getElementById('list');
+  listEl.innerHTML = '';
+  const sourceFilter = document.getElementById('source-filter').value;
+  state.filtered = state.items.filter((item) => !sourceFilter || item.source === sourceFilter);
+
+  if (!state.filtered.length) {
+    document.getElementById('empty-state').classList.remove('hidden');
+    return;
+  }
+  document.getElementById('empty-state').classList.add('hidden');
+
+  state.filtered.forEach((item) => {
+    const card = document.createElement('div');
+    card.className = 'call-card';
+    card.role = 'listitem';
+    const snippet = buildSnippet(item);
+    card.innerHTML = `
+      <div class="card-header">
+        <div class="filename">${item.filename}</div>
+        <div class="badge-row">
+          ${renderStatusBadge(item.status)}
+          ${renderSourceBadge(item.source)}
+        </div>
+      </div>
+      <p class="snippet">${snippet}</p>
+      <div class="meta">
+        <span>${formatTime(item.updated_at)}</span>
+        ${item.call_type ? `<span>${item.call_type}</span>` : ''}
+      </div>
     `;
-    div.addEventListener('click', () => selectItem(item));
-    container.appendChild(div);
+    card.addEventListener('click', () => selectItem(item));
+    listEl.appendChild(card);
   });
-  document.getElementById('page-info').textContent = `Page ${state.page}`;
 }
 
-function changePage(delta) {
-  if (state.page + delta < 1) return;
-  state.page += delta;
-  loadList();
+function buildSnippet(item) {
+  const text = item.clean_transcript_text || item.transcript_text || item.raw_transcript_text;
+  if (!text) return 'Transcript not available yet.';
+  const trimmed = text.replace(/\s+/g, ' ').trim();
+  return trimmed.length > 140 ? `${trimmed.slice(0, 140)}…` : trimmed;
+}
+
+function renderStatusBadge(status) {
+  const cls = `badge status-${status || 'queued'}`;
+  const label = status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Queued';
+  return `<span class="${cls}">${label}</span>`;
+}
+
+function renderSourceBadge(source) {
+  if (!source) return '';
+  return `<span class="badge source-${source}">${source}</span>`;
 }
 
 async function selectItem(item) {
-  const res = await fetch(`/api/transcription/${encodeURIComponent(item.filename)}`);
-  const data = await res.json();
-  state.selected = data;
-  document.getElementById('detail-name').textContent = data.filename;
-  const meta = [];
-  if (data.size_bytes) meta.push(`${(data.size_bytes/1024/1024).toFixed(2)} MB`);
-  if (data.duration_seconds) meta.push(`${data.duration_seconds.toFixed(1)}s`);
-  if (data.hash) meta.push(`hash ${data.hash.slice(0,10)}`);
-  if (data.duplicate_of) meta.push(`duplicate of ${data.duplicate_of}`);
-  document.getElementById('detail-meta').textContent = meta.join(' • ');
-  const tags = [];
-  if (data.call_type) tags.push(`Call Type: ${data.call_type}`);
-  if (data.recognized_towns) tags.push(`Towns: ${data.recognized_towns}`);
-  if (data.requested_model) tags.push(`Model: ${data.requested_model}`);
-  if (data.requested_mode) tags.push(`Mode: ${data.requested_mode}`);
-  document.getElementById('detail-tags').textContent = tags.join(' • ');
-  updateTranscript('clean');
-  setActiveTab('clean');
-  const player = document.getElementById('player');
-  player.src = `/${encodeURIComponent(item.filename)}`;
-  renderSimilar(item.filename);
-  drawWaveform(player);
+  try {
+    const res = await fetch(`/api/transcription/${encodeURIComponent(item.filename)}`);
+    if (!res.ok) throw new Error('failed');
+    const data = await res.json();
+    state.selected = data;
+    document.getElementById('detail-title').textContent = data.filename;
+    const metaParts = [];
+    if (data.duration_seconds) metaParts.push(`${data.duration_seconds.toFixed(1)}s`);
+    if (data.size_bytes) metaParts.push(`${(data.size_bytes / 1024 / 1024).toFixed(2)} MB`);
+    metaParts.push(formatTime(data.updated_at));
+    document.getElementById('detail-meta').textContent = metaParts.filter(Boolean).join(' • ');
+    renderBadges(data);
+    updateTranscript(state.activeTab);
+  } catch (e) {
+    document.getElementById('detail-meta').textContent = 'Unable to load transcription details.';
+  }
+}
+
+function renderBadges(data) {
+  const wrap = document.getElementById('detail-badges');
+  wrap.innerHTML = '';
+  wrap.insertAdjacentHTML('beforeend', renderStatusBadge(data.status));
+  wrap.insertAdjacentHTML('beforeend', renderSourceBadge(data.source));
+  if (data.call_type) wrap.insertAdjacentHTML('beforeend', `<span class="badge">${data.call_type}</span>`);
+  if (data.recognized_towns) wrap.insertAdjacentHTML('beforeend', `<span class="badge">${data.recognized_towns}</span>`);
 }
 
 function setupTabs() {
-  document.querySelectorAll('.transcript-tabs button').forEach(btn => {
+  document.querySelectorAll('.transcript-tabs button').forEach((btn) => {
     btn.addEventListener('click', () => {
+      state.activeTab = btn.dataset.tab;
       setActiveTab(btn.dataset.tab);
       updateTranscript(btn.dataset.tab);
     });
@@ -115,106 +145,78 @@ function setupTabs() {
 }
 
 function setActiveTab(tab) {
-  document.querySelectorAll('.transcript-tabs button').forEach(btn => {
+  document.querySelectorAll('.transcript-tabs button').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.tab === tab);
   });
 }
 
 function updateTranscript(tab) {
-  const data = state.selected;
   const pre = document.getElementById('transcript-text');
-  if (!data) { pre.textContent = 'Select a call to view transcript'; return; }
+  const data = state.selected;
+  if (!data) {
+    pre.textContent = 'No call selected.';
+    return;
+  }
   let text = '';
   if (tab === 'raw') text = data.raw_transcript_text || data.transcript_text || '';
   else if (tab === 'translation') text = data.translation_text || 'No translation available yet.';
   else text = data.clean_transcript_text || data.transcript_text || '';
-  if (!text) text = `Status: ${data.status}`;
-  pre.textContent = text;
+  pre.textContent = text || `Status: ${data.status}`;
 }
 
-async function renderSimilar(filename) {
-  const res = await fetch(`/api/transcription/${encodeURIComponent(filename)}/similar`);
-  if (!res.ok) return;
-  const sims = await res.json();
-  const container = document.getElementById('similar');
-  container.innerHTML = '';
-  if (!sims.length) return;
-  const h = document.createElement('h3');
-  h.textContent = 'Similar calls';
-  container.appendChild(h);
-  sims.forEach(s => {
-    const div = document.createElement('div');
-    div.textContent = `${s.filename} (${s.score.toFixed(2)})`;
-    container.appendChild(div);
-  });
+function toggleError(show) {
+  document.getElementById('list-error').classList.toggle('hidden', !show);
+  document.getElementById('list').classList.toggle('hidden', show);
+  document.getElementById('empty-state').classList.toggle('hidden', show);
 }
 
-function debounce(fn, wait) {
-  let t;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn.apply(this, args), wait);
-  };
-}
-
-function drawWaveform(audioEl) {
-  const canvas = document.getElementById('waveform');
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  audioEl.addEventListener('play', () => renderWave(ctx, audioEl));
-}
-
-async function renderWave(ctx, audioEl) {
-  const audioCtx = new AudioContext();
-  const source = audioCtx.createMediaElementSource(audioEl);
-  const analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 2048;
-  const bufferLength = analyser.frequencyBinCount;
-  const dataArray = new Uint8Array(bufferLength);
-  source.connect(analyser);
-  analyser.connect(audioCtx.destination);
-  function draw() {
-    if (audioEl.paused) return;
-    requestAnimationFrame(draw);
-    analyser.getByteTimeDomainData(dataArray);
-    ctx.fillStyle = 'rgba(0,0,0,0)';
-    ctx.clearRect(0,0,ctx.canvas.width, ctx.canvas.height);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#60a5fa';
-    ctx.beginPath();
-    const sliceWidth = ctx.canvas.width * 1.0 / bufferLength;
-    let x = 0;
-    for(let i = 0; i < bufferLength; i++) {
-      const v = dataArray[i] / 128.0;
-      const y = v * ctx.canvas.height/2;
-      if(i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-      x += sliceWidth;
-    }
-    ctx.lineTo(ctx.canvas.width, ctx.canvas.height/2);
-    ctx.stroke();
+async function loadStatus() {
+  try {
+    const res = await fetch('/debug/queue');
+    if (!res.ok) throw new Error('status failed');
+    const data = await res.json();
+    document.getElementById('queue-level').textContent = data.length ?? '--';
+    document.getElementById('queue-capacity').textContent = `of ${data.capacity ?? '--'}`;
+    document.getElementById('worker-count').textContent = data.workers ?? '--';
+    document.getElementById('stat-queue').textContent = `${data.length ?? 0}`;
+    document.getElementById('stat-capacity').textContent = data.capacity ?? '--';
+    document.getElementById('stat-workers').textContent = data.workers ?? '--';
+    document.getElementById('stat-processed').textContent = data.processed_jobs ?? '--';
+    document.getElementById('stat-failed').textContent = data.failed_jobs ?? '--';
+    renderBackfill(data.last_backfill);
+  } catch (e) {
+    document.getElementById('backfill-caption').textContent = 'Unable to load status right now.';
   }
-  draw();
 }
 
-function showSettings() {
-  document.getElementById('settings-panel').classList.remove('hidden');
-}
-
-function hideSettings() {
-  document.getElementById('settings-panel').classList.add('hidden');
+function renderBackfill(summary) {
+  if (!summary) {
+    document.getElementById('backfill-caption').textContent = 'No runs yet.';
+    return;
+  }
+  document.getElementById('backfill-caption').textContent = `${summary.selected || 0} selected • ${summary.enqueued || 0} enqueued`;
+  document.getElementById('bf-selected').textContent = summary.selected ?? '--';
+  document.getElementById('bf-enqueued').textContent = summary.enqueued ?? '--';
+  document.getElementById('bf-dropped').textContent = summary.dropped_full ?? '--';
+  document.getElementById('bf-errors').textContent = summary.other_errors ?? '--';
+  document.getElementById('bf-processed').textContent = summary.already_processed ?? '--';
+  document.getElementById('bf-unprocessed').textContent = summary.unprocessed ?? '--';
 }
 
 async function loadSettings() {
-  const res = await fetch('/api/settings');
-  if (!res.ok) return;
-  const data = await res.json();
-  document.getElementById('setting-model').value = data.DefaultModel || 'gpt-4o-transcribe';
-  document.getElementById('setting-mode').value = data.DefaultMode || 'transcribe';
-  document.getElementById('setting-format').value = data.DefaultFormat || 'json';
-  document.getElementById('setting-auto').checked = data.AutoTranslate;
-  document.getElementById('setting-webhooks').value = (data.WebhookEndpoints || []).join('\n');
-  document.getElementById('setting-cleanup').value = data.CleanupPrompt || '';
+  try {
+    const res = await fetch('/api/settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    document.getElementById('setting-model').value = data.DefaultModel || 'gpt-4o-transcribe';
+    document.getElementById('setting-mode').value = data.DefaultMode || 'transcribe';
+    document.getElementById('setting-format').value = data.DefaultFormat || 'json';
+    document.getElementById('setting-auto').checked = !!data.AutoTranslate;
+    document.getElementById('setting-webhooks').value = (data.WebhookEndpoints || []).join('\n');
+    document.getElementById('setting-cleanup').value = data.CleanupPrompt || '';
+  } catch (e) {
+    // ignore
+  }
 }
 
 async function saveSettings(e) {
@@ -224,10 +226,8 @@ async function saveSettings(e) {
     DefaultMode: document.getElementById('setting-mode').value,
     DefaultFormat: document.getElementById('setting-format').value,
     AutoTranslate: document.getElementById('setting-auto').checked,
-    WebhookEndpoints: document.getElementById('setting-webhooks').value.split('\n').map(s => s.trim()).filter(Boolean),
+    WebhookEndpoints: document.getElementById('setting-webhooks').value.split('\n').map((v) => v.trim()).filter(Boolean),
     CleanupPrompt: document.getElementById('setting-cleanup').value,
   };
   await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-  alert('Settings saved');
-  hideSettings();
 }

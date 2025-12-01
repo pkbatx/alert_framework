@@ -33,8 +33,8 @@ func TestSelectPendingRespectsLimitAndStatus(t *testing.T) {
 	if summary.Unprocessed != 24 {
 		t.Fatalf("expected 24 unprocessed, got %d", summary.Unprocessed)
 	}
-	if summary.SelectedForBackfill != 15 {
-		t.Fatalf("expected 15 selected, got %d", summary.SelectedForBackfill)
+	if summary.Selected != 15 {
+		t.Fatalf("expected 15 selected, got %d", summary.Selected)
 	}
 	for _, rec := range pending {
 		if rec.Status == StatusDone {
@@ -64,17 +64,17 @@ func TestBackfillRunReportsDrops(t *testing.T) {
 
 	select {
 	case summary := <-summaryCh:
-		if summary.EnqueueSucceeded != 2 {
-			t.Fatalf("expected 2 enqueues, got %d", summary.EnqueueSucceeded)
+		if summary.Enqueued != 2 {
+			t.Fatalf("expected 2 enqueues, got %d", summary.Enqueued)
 		}
-		if summary.EnqueueDroppedFull != 3 {
-			t.Fatalf("expected 3 dropped jobs, got %d", summary.EnqueueDroppedFull)
+		if summary.DroppedFull != 3 {
+			t.Fatalf("expected 3 dropped jobs, got %d", summary.DroppedFull)
 		}
-		if summary.SelectedForBackfill != 5 {
-			t.Fatalf("expected 5 selected, got %d", summary.SelectedForBackfill)
+		if summary.Selected != 5 {
+			t.Fatalf("expected 5 selected, got %d", summary.Selected)
 		}
-		if summary.AttemptedEnqueue != 5 {
-			t.Fatalf("expected 5 attempts, got %d", summary.AttemptedEnqueue)
+		if summary.Unprocessed != 5 {
+			t.Fatalf("expected unprocessed count, got %d", summary.Unprocessed)
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for backfill summary")
@@ -92,12 +92,12 @@ func (r *stubRepo) ListCandidates(ctx context.Context) ([]Record, error) {
 	return r.candidates, nil
 }
 
-func (r *stubRepo) QueueRecord(ctx context.Context, rec Record) EnqueueResult {
+func (r *stubRepo) QueueRecord(ctx context.Context, rec Record) (EnqueueResult, error) {
 	if r.enqueued < r.allowEnqueue {
 		r.enqueued++
-		return EnqueueResult{Enqueued: true}
+		return EnqueueResult{Enqueued: true}, nil
 	}
-	return EnqueueResult{DroppedFull: true}
+	return EnqueueResult{DroppedFull: true}, nil
 }
 
 func (r *stubRepo) OnBackfillComplete(summary Summary) {
