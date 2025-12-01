@@ -183,7 +183,7 @@ async function loadStatus() {
     document.getElementById('stat-workers').textContent = data.workers ?? '--';
     document.getElementById('stat-processed').textContent = data.processed_jobs ?? '--';
     document.getElementById('stat-failed').textContent = data.failed_jobs ?? '--';
-    renderBackfill(data.last_backfill);
+    renderBackfill(data.has_backfill ? data.last_backfill : null);
   } catch (e) {
     document.getElementById('backfill-caption').textContent = 'Unable to load status right now.';
   }

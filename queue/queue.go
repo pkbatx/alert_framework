@@ -1,16 +1,17 @@
 package queue
 
 import (
+	"alert_framework/metrics"
 	"context"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 // Job encapsulates a unit of work processed by the worker pool.
 type Job struct {
 	ID       string
+	FileName string
 	Source   string
 	Work     func(context.Context) error
 	OnFinish func(error)
@@ -21,8 +22,6 @@ type Stats struct {
 	Length      int
 	Capacity    int
 	WorkerCount int
-	Processed   uint64
-	Failed      uint64
 }
 
 // Queue represents a bounded job queue with a fixed worker pool.
@@ -33,16 +32,16 @@ type Queue struct {
 	started     bool
 	mu          sync.RWMutex
 	wg          sync.WaitGroup
-	processed   uint64
-	failed      uint64
+	metrics     *metrics.Metrics
 }
 
 // New creates a new Queue with the provided capacity, worker count, and per-job timeout.
-func New(capacity, workerCount int, timeout time.Duration) *Queue {
+func New(capacity, workerCount int, timeout time.Duration, m *metrics.Metrics) *Queue {
 	return &Queue{
 		jobs:        make(chan Job, capacity),
 		workerCount: workerCount,
 		timeout:     timeout,
+		metrics:     m,
 	}
 }
 
@@ -145,8 +144,6 @@ func (q *Queue) Stats() Stats {
 		Length:      length,
 		Capacity:    cap(q.jobs),
 		WorkerCount: q.workerCount,
-		Processed:   atomic.LoadUint64(&q.processed),
-		Failed:      atomic.LoadUint64(&q.failed),
 	}
 }
 
@@ -179,15 +176,18 @@ func (q *Queue) handleJob(ctx context.Context, j Job) {
 	if j.OnFinish != nil {
 		j.OnFinish(err)
 	}
-	atomic.AddUint64(&q.processed, 1)
-	if err != nil {
-		atomic.AddUint64(&q.failed, 1)
+	if q.metrics != nil {
+		q.metrics.RecordJobCompletion(err)
 	}
 	status := "success"
 	if err != nil {
-		status = err.Error()
+		status = "error"
 	}
-	log.Printf("job_source=%s job=%s duration_ms=%d status=%s", j.Source, j.ID, time.Since(start).Milliseconds(), status)
+	file := j.FileName
+	if file == "" {
+		file = j.ID
+	}
+	log.Printf("job_source=%s file=%s status=%s err=%v duration_ms=%d", j.Source, file, status, err, time.Since(start).Milliseconds())
 }
 
 // Healthy returns true if the queue has been started.
