@@ -28,6 +28,7 @@ import (
 
 	"alert_framework/backfill"
 	"alert_framework/config"
+	"alert_framework/formatting"
 	"alert_framework/metrics"
 	"alert_framework/queue"
 	"github.com/fsnotify/fsnotify"
@@ -122,7 +123,7 @@ type processJob struct {
 	sendGroupMe bool
 	force       bool
 	options     TranscriptionOptions
-	meta        CallMetadata
+	meta        formatting.CallMetadata
 	prettyTitle string
 	publicURL   string
 }
@@ -564,7 +565,7 @@ func (s *server) watch() {
 
 func (s *server) handleNewFile(filename string) {
 	meta, pretty, publicURL := s.buildJobContext(filename)
-	text := BuildAlertMessage(meta, pretty, publicURL)
+	text := formatting.BuildAlertMessage(meta, pretty, publicURL)
 	if err := s.sendGroupMe(text); err != nil {
 		log.Printf("groupme send failed: %v", err)
 	}
@@ -602,13 +603,13 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 	return enqueued, dropped
 }
 
-func (s *server) buildJobContext(filename string) (CallMetadata, string, string) {
-	meta, err := ParseCallMetadataFromFilename(filename, s.tz)
+func (s *server) buildJobContext(filename string) (formatting.CallMetadata, string, string) {
+	meta, err := formatting.ParseCallMetadataFromFilename(filename, s.tz)
 	if err != nil {
 		log.Printf("metadata parse failed for %s: %v", filename, err)
-		meta = CallMetadata{RawFileName: filename, DateTime: time.Now().In(s.tz)}
+		meta = formatting.CallMetadata{RawFileName: filename, DateTime: time.Now().In(s.tz)}
 	}
-	pretty := FormatPrettyTitle(filename, time.Now(), s.tz)
+	pretty := formatting.FormatPrettyTitle(filename, time.Now(), s.tz)
 	return meta, pretty, s.publicURL(filename)
 }
 
@@ -2106,7 +2107,7 @@ func (s *server) fireWebhooks(j processJob) error {
 		"filename":       t.Filename,
 		"url":            j.publicURL,
 		"pretty_title":   j.prettyTitle,
-		"alert_message":  BuildAlertMessage(j.meta, j.prettyTitle, j.publicURL),
+		"alert_message":  formatting.BuildAlertMessage(j.meta, j.prettyTitle, j.publicURL),
 		"metadata": map[string]interface{}{
 			"agency":    nullableString(j.meta.AgencyDisplay),
 			"town":      nullableString(j.meta.TownDisplay),
