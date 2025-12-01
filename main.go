@@ -60,9 +60,92 @@ var (
 	allowedExtensions = map[string]struct{}{
 		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
 	}
-	sussexTowns          = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
-	defaultCleanupPrompt = "You are cleaning emergency radio transcripts for Sussex County, NJ. Normalize spelling, fix misheard Sussex County town names to the closest from this list: " + strings.Join(sussexTowns, ", ") + ". Return JSON with fields normalized_transcript and recognized_towns (array). Maintain the original meaning and avoid adding new details."
+	sussexTowns       = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
+	warrenTowns       = []string{"Allamuchy", "Alpha", "Belvidere", "Blairstown", "Franklin", "Frelinghuysen", "Greenwich", "Hackettstown", "Hardwick", "Harmony", "Hope", "Independence", "Knowlton", "Liberty", "Lopatcong", "Mansfield", "Oxford", "Phillipsburg", "Pohatcong", "Washington Boro", "Washington Township", "White"}
+	volunteerAgencies = []string{
+		"Andover Borough Fire Department",
+		"Andover Township Fire Department",
+		"Branchville Hose Company #1",
+		"Byram Township Fire Department",
+		"Fredon Volunteer Fire Company",
+		"Frankford Township Fire Department",
+		"Franklin Fire Department",
+		"Glenwood Pochuck Volunteer Ambulance Corps",
+		"Green Township Volunteer Fire Department",
+		"Hamburg Fire Department",
+		"Hardyston Township Volunteer Fire Department",
+		"Hopatcong Fire Department",
+		"Lafayette Township Volunteer Fire Department",
+		"Montague Volunteer Fire Department",
+		"Newton Fire Department",
+		"Ogdensburg Fire Department",
+		"Sandyston Township Volunteer Fire Department",
+		"Sparta Ambulance Squad",
+		"Sparta Township Fire Department",
+		"Stanhope-Netcong Ambulance Corps",
+		"Stillwater Area Volunteer Fire Company",
+		"Sussex Fire Department",
+		"Vernon Township Ambulance Squad",
+		"Vernon Township Fire Department",
+		"Wantage Township First Aid Squad",
+		"Allamuchy-Green First Aid Squad",
+		"Belvidere Volunteer Fire Company",
+		"Blairstown Ambulance Corps",
+		"Franklin Township Fire Department (Warren)",
+		"Great Meadows Regional EMS",
+		"Hackettstown First Aid and Rescue Squad",
+		"Harmony Township Volunteer Fire Company",
+		"Hope Volunteer Fire Department",
+		"Knowlton Township Volunteer Fire and Rescue",
+		"Liberty Township Volunteer Fire Department",
+		"Mansfield Township Fire Company #1",
+		"Oxford Emergency Squad",
+		"Phillipsburg Emergency Squad",
+		"Pohatcong Township Volunteer Fire Company",
+		"Washington Borough Fire Department",
+		"Washington Township Volunteer Fire Department",
+		"White Township Volunteer Fire Department",
+	}
+	defaultCleanupPrompt = buildCleanupPrompt()
+	countyByTown         = buildCountyLookup()
+	volunteerTownLookup  = buildVolunteerTownSet()
 )
+
+func buildCleanupPrompt() string {
+	townList := "Sussex County towns: " + strings.Join(sussexTowns, ", ") + "."
+	warrenList := "Warren County towns: " + strings.Join(warrenTowns, ", ") + "."
+	agencies := "Volunteer agencies to recognize: " + strings.Join(volunteerAgencies, "; ") + "."
+	return strings.Join([]string{
+		"You are cleaning emergency radio transcripts for Sussex and Warren County, NJ.",
+		"Normalize spelling and fix misheard town or agency names to the closest match from the lists below.",
+		townList,
+		warrenList,
+		agencies,
+		"Return JSON with fields normalized_transcript and recognized_towns (array). Maintain the original meaning and avoid adding new details.",
+	}, " ")
+}
+
+func buildCountyLookup() map[string]string {
+	counties := make(map[string]string)
+	for _, town := range sussexTowns {
+		counties[strings.ToLower(town)] = "Sussex"
+	}
+	for _, town := range warrenTowns {
+		counties[strings.ToLower(town)] = "Warren"
+	}
+	return counties
+}
+
+func buildVolunteerTownSet() map[string]struct{} {
+	lookup := make(map[string]struct{})
+	for _, town := range sussexTowns {
+		lookup[strings.ToLower(town)] = struct{}{}
+	}
+	for _, town := range warrenTowns {
+		lookup[strings.ToLower(town)] = struct{}{}
+	}
+	return lookup
+}
 
 // transcription statuses
 const (
@@ -115,6 +198,37 @@ type transcription struct {
 type similar struct {
 	Filename string  `json:"filename"`
 	Score    float64 `json:"score"`
+}
+
+type transcriptionResponse struct {
+	Filename             string    `json:"filename"`
+	SourcePath           string    `json:"source_path,omitempty"`
+	Source               string    `json:"source"`
+	Transcript           *string   `json:"transcript_text,omitempty"`
+	RawTranscript        *string   `json:"raw_transcript_text,omitempty"`
+	CleanTranscript      *string   `json:"clean_transcript_text,omitempty"`
+	Translation          *string   `json:"translation_text,omitempty"`
+	Status               string    `json:"status"`
+	LastError            *string   `json:"last_error,omitempty"`
+	SizeBytes            *int64    `json:"size_bytes,omitempty"`
+	DurationSeconds      *float64  `json:"duration_seconds,omitempty"`
+	Hash                 *string   `json:"hash,omitempty"`
+	DuplicateOf          *string   `json:"duplicate_of,omitempty"`
+	RequestedModel       *string   `json:"requested_model,omitempty"`
+	RequestedMode        *string   `json:"requested_mode,omitempty"`
+	RequestedFormat      *string   `json:"requested_format,omitempty"`
+	ActualModel          *string   `json:"actual_model,omitempty"`
+	DiarizedJSON         *string   `json:"diarized_json,omitempty"`
+	RecognizedTowns      []string  `json:"recognized_towns,omitempty"`
+	NormalizedTranscript *string   `json:"normalized_transcript,omitempty"`
+	CallType             *string   `json:"call_type,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+	PrettyTitle          string    `json:"pretty_title,omitempty"`
+	Town                 string    `json:"town,omitempty"`
+	Agency               string    `json:"agency,omitempty"`
+	AudioURL             string    `json:"audio_url,omitempty"`
+	Tags                 []string  `json:"tags,omitempty"`
 }
 
 type processJob struct {
@@ -1572,33 +1686,10 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 	if existing != nil {
 		switch existing.Status {
 		case statusDone:
-			respondJSON(w, map[string]interface{}{
-				"filename":              existing.Filename,
-				"status":                existing.Status,
-				"transcript_text":       pickTranscript(existing),
-				"raw_transcript_text":   existing.RawTranscript,
-				"clean_transcript_text": existing.CleanTranscript,
-				"translation_text":      existing.Translation,
-				"requested_model":       existing.RequestedModel,
-				"requested_mode":        existing.RequestedMode,
-				"requested_format":      existing.RequestedFormat,
-				"actual_model":          existing.ActualModel,
-				"diarized_json":         existing.DiarizedJSON,
-				"recognized_towns":      existing.RecognizedTowns,
-				"normalized_transcript": existing.NormalizedTranscript,
-				"call_type":             existing.CallType,
-				"size_bytes":            existing.SizeBytes,
-				"duration_seconds":      existing.DurationSeconds,
-				"hash":                  existing.Hash,
-				"duplicate_of":          existing.DuplicateOf,
-				"last_error":            existing.LastError,
-			})
+			respondJSON(w, s.toResponse(*existing))
 			return
 		case statusProcessing:
-			respondJSON(w, map[string]interface{}{
-				"filename": existing.Filename,
-				"status":   existing.Status,
-			})
+			respondJSON(w, s.toResponse(*existing))
 			return
 		case statusError:
 			s.queueJob("api", cleaned, false, true, opts)
@@ -1775,14 +1866,14 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var result []transcription
+	var result []transcriptionResponse
 	for rows.Next() {
 		var t transcription
 		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		result = append(result, t)
+		result = append(result, s.toResponse(t))
 	}
 	respondJSON(w, result)
 }
@@ -1790,6 +1881,150 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 func respondJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func parseRecognizedTownList(raw *string) []string {
+	if raw == nil {
+		return nil
+	}
+	val := strings.TrimSpace(*raw)
+	if val == "" {
+		return nil
+	}
+	var towns []string
+	if err := json.Unmarshal([]byte(val), &towns); err == nil {
+		return towns
+	}
+	val = strings.Trim(val, "[]")
+	val = strings.ReplaceAll(val, "\"", "")
+	for _, part := range strings.Split(val, ",") {
+		if t := strings.TrimSpace(part); t != "" {
+			towns = append(towns, t)
+		}
+	}
+	return towns
+}
+
+func normalizeTag(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := strings.Fields(value)
+	for i, p := range parts {
+		if len(p) == 1 {
+			parts[i] = strings.ToUpper(p)
+			continue
+		}
+		parts[i] = strings.ToUpper(string(p[0])) + strings.ToLower(p[1:])
+	}
+	return strings.Join(parts, " ")
+}
+
+func appendIfMissing(list []string, seen map[string]struct{}, value string) []string {
+	value = normalizeTag(value)
+	if value == "" {
+		return list
+	}
+	key := strings.ToLower(value)
+	if _, ok := seen[key]; ok {
+		return list
+	}
+	seen[key] = struct{}{}
+	return append(list, value)
+}
+
+func (s *server) deriveCounty(meta formatting.CallMetadata, recognized []string) string {
+	candidates := []string{meta.TownDisplay, meta.AgencyDisplay}
+	candidates = append(candidates, recognized...)
+	for _, name := range candidates {
+		if county, ok := countyByTown[strings.ToLower(strings.TrimSpace(name))]; ok {
+			return county
+		}
+	}
+	return ""
+}
+
+func (s *server) isVolunteer(meta formatting.CallMetadata, recognized []string) bool {
+	candidates := []string{meta.TownDisplay, meta.AgencyDisplay}
+	candidates = append(candidates, recognized...)
+	for _, name := range candidates {
+		if _, ok := volunteerTownLookup[strings.ToLower(strings.TrimSpace(name))]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *server) buildTags(meta formatting.CallMetadata, recognized []string, callType *string) []string {
+	seen := make(map[string]struct{})
+	tags := make([]string, 0, 8)
+	tags = appendIfMissing(tags, seen, meta.TownDisplay)
+	tags = appendIfMissing(tags, seen, meta.AgencyDisplay)
+	if callType != nil && *callType != "" {
+		tags = appendIfMissing(tags, seen, *callType)
+	} else if meta.CallType != "" {
+		tags = appendIfMissing(tags, seen, meta.CallType)
+	}
+	for _, town := range recognized {
+		tags = appendIfMissing(tags, seen, town)
+	}
+	if county := s.deriveCounty(meta, recognized); county != "" {
+		tags = appendIfMissing(tags, seen, county+" County")
+	}
+	if s.isVolunteer(meta, recognized) {
+		tags = appendIfMissing(tags, seen, "Volunteer")
+	}
+	return tags
+}
+
+func (s *server) toResponse(t transcription) transcriptionResponse {
+	meta, err := formatting.ParseCallMetadataFromFilename(t.Filename, s.tz)
+	if err != nil {
+		meta = formatting.CallMetadata{RawFileName: t.Filename, DateTime: t.UpdatedAt.In(s.tz)}
+	}
+	if meta.DateTime.IsZero() {
+		meta.DateTime = time.Now().In(s.tz)
+	}
+	recognized := parseRecognizedTownList(t.RecognizedTowns)
+	callType := t.CallType
+	if callType == nil && meta.CallType != "" {
+		ct := meta.CallType
+		callType = &ct
+	}
+	pretty := formatting.FormatPrettyTitle(t.Filename, meta.DateTime, s.tz)
+	tags := s.buildTags(meta, recognized, callType)
+
+	return transcriptionResponse{
+		Filename:             t.Filename,
+		SourcePath:           t.SourcePath,
+		Source:               t.Source,
+		Transcript:           t.Transcript,
+		RawTranscript:        t.RawTranscript,
+		CleanTranscript:      t.CleanTranscript,
+		Translation:          t.Translation,
+		Status:               t.Status,
+		LastError:            t.LastError,
+		SizeBytes:            t.SizeBytes,
+		DurationSeconds:      t.DurationSeconds,
+		Hash:                 t.Hash,
+		DuplicateOf:          t.DuplicateOf,
+		RequestedModel:       t.RequestedModel,
+		RequestedMode:        t.RequestedMode,
+		RequestedFormat:      t.RequestedFormat,
+		ActualModel:          t.ActualModel,
+		DiarizedJSON:         t.DiarizedJSON,
+		RecognizedTowns:      recognized,
+		NormalizedTranscript: t.NormalizedTranscript,
+		CallType:             callType,
+		CreatedAt:            t.CreatedAt,
+		UpdatedAt:            t.UpdatedAt,
+		PrettyTitle:          pretty,
+		Town:                 meta.TownDisplay,
+		Agency:               meta.AgencyDisplay,
+		AudioURL:             s.publicURL(t.Filename),
+		Tags:                 tags,
+	}
 }
 
 func (s *server) loadSettings() (AppSettings, error) {

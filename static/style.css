@@ -135,6 +135,7 @@ button.ghost { background: transparent; border-color: var(--border); }
 .call-card .card-header { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
 .call-card .filename { font-weight: 700; word-break: break-all; }
 .badge-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.tag-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
 
 .badge {
   display: inline-flex;
@@ -146,6 +147,7 @@ button.ghost { background: transparent; border-color: var(--border); }
   letter-spacing: 0.01em;
   border: 1px solid transparent;
 }
+.badge.tag { background: rgba(91, 208, 255, 0.1); color: var(--text); border-color: rgba(91, 208, 255, 0.25); }
 .badge.status-done { background: rgba(74, 222, 128, 0.15); color: var(--success); border-color: rgba(74, 222, 128, 0.35); }
 .badge.status-processing { background: rgba(251, 191, 36, 0.12); color: var(--warning); border-color: rgba(251, 191, 36, 0.32); }
 .badge.status-queued { background: rgba(91, 208, 255, 0.12); color: var(--accent); border-color: rgba(91, 208, 255, 0.3); }
@@ -155,6 +157,11 @@ button.ghost { background: transparent; border-color: var(--border); }
 
 .snippet { margin: 6px 0 8px; color: var(--muted); line-height: 1.4; }
 .meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.muted.tight { margin: 2px 0; }
+
+.audio-link { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-weight: 600; text-decoration: none; }
+.audio-link::before { content: '▶'; font-size: 12px; }
+.audio-link:hover { text-decoration: underline; }
 
 .stack { display: grid; gap: 12px; }
 .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
