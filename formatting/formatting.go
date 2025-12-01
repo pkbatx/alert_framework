@@ -45,32 +45,36 @@ func FormatPrettyTitle(fileName string, now time.Time, loc *time.Location) strin
 func ParseCallMetadataFromFilename(fileName string, loc *time.Location) (CallMetadata, error) {
 	base := filepath.Base(fileName)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
-	parts := strings.Split(base, "_")
-	if len(parts) < 8 {
-		return CallMetadata{RawFileName: fileName}, fmt.Errorf("filename does not match expected pattern")
+
+	// Split on underscores while ignoring empty segments so filenames with
+	// doubled separators (e.g., "EMS__Duty") are handled gracefully.
+	parts := strings.FieldsFunc(base, func(r rune) bool { return r == '_' })
+	if len(parts) < 7 {
+		return CallMetadata{RawFileName: fileName}, fmt.Errorf("filename does not contain enough segments")
 	}
 
-	year, err := strconv.Atoi(parts[2])
+	numericParts := parts[len(parts)-6:]
+	year, err := strconv.Atoi(numericParts[0])
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	month, err := strconv.Atoi(parts[3])
+	month, err := strconv.Atoi(numericParts[1])
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	day, err := strconv.Atoi(parts[4])
+	day, err := strconv.Atoi(numericParts[2])
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	hour, err := strconv.Atoi(parts[5])
+	hour, err := strconv.Atoi(numericParts[3])
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	minute, err := strconv.Atoi(parts[6])
+	minute, err := strconv.Atoi(numericParts[4])
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	second, err := strconv.Atoi(parts[7])
+	second, err := strconv.Atoi(numericParts[5])
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
@@ -78,10 +82,20 @@ func ParseCallMetadataFromFilename(fileName string, loc *time.Location) (CallMet
 	if loc == nil {
 		loc = time.Local
 	}
-	dt := time.Date(year, time.Month(month), day, hour, minute, second, 0, loc)
-	agencyTown := normalizeDisplay(parts[0])
-	callType := strings.ToUpper(parts[1])
 
+	agencyTown := ""
+	callType := ""
+	descriptive := parts[:len(parts)-6]
+	if len(descriptive) > 0 {
+		if len(descriptive) > 1 {
+			agencyTown = normalizeDisplay(strings.Join(descriptive[:len(descriptive)-1], " "))
+			callType = strings.ToUpper(descriptive[len(descriptive)-1])
+		} else {
+			agencyTown = normalizeDisplay(descriptive[0])
+		}
+	}
+
+	dt := time.Date(year, time.Month(month), day, hour, minute, second, 0, loc)
 	return CallMetadata{
 		AgencyDisplay: agencyTown,
 		TownDisplay:   agencyTown,
