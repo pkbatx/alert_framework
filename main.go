@@ -214,6 +214,9 @@ func main() {
 
 	m := metrics.New()
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	s := &server{
 		db:       db,
 		client:   &http.Client{Timeout: 180 * time.Second},
@@ -224,9 +227,6 @@ func main() {
 		tz:       tz,
 		ctx:      ctx,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	s.queue = queue.New(cfg.JobQueueSize, cfg.WorkerCount, time.Duration(cfg.JobTimeoutSec)*time.Second, m)
 	s.queue.Start(ctx)
