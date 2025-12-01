@@ -38,3 +38,49 @@ func TestParseCallMetadataFromFilename(t *testing.T) {
 		t.Fatalf("unexpected datetime: %v", meta.DateTime)
 	}
 }
+
+func TestParseCallMetadataWithExtraTokens(t *testing.T) {
+	loc, err := time.LoadLocation("EST5EDT")
+	if err != nil {
+		t.Fatalf("failed to load location: %v", err)
+	}
+
+	meta, err := ParseCallMetadataFromFilename("Sussex_County_FM_2025_11_27_20_02_27.mp3", loc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.AgencyDisplay != "Sussex County" {
+		t.Fatalf("unexpected agency display: %s", meta.AgencyDisplay)
+	}
+	if meta.CallType != "FM" {
+		t.Fatalf("unexpected call type: %s", meta.CallType)
+	}
+
+	expectedTime := time.Date(2025, time.November, 27, 20, 2, 27, 0, loc)
+	if !meta.DateTime.Equal(expectedTime) {
+		t.Fatalf("unexpected datetime: %v", meta.DateTime)
+	}
+}
+
+func TestParseCallMetadataWithEmptySegments(t *testing.T) {
+	loc, err := time.LoadLocation("EST5EDT")
+	if err != nil {
+		t.Fatalf("failed to load location: %v", err)
+	}
+
+	meta, err := ParseCallMetadataFromFilename("Newton_EMS__Duty__2025_11_27_20_02_59.mp3", loc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.AgencyDisplay != "Newton EMS" {
+		t.Fatalf("unexpected agency display: %s", meta.AgencyDisplay)
+	}
+	if meta.CallType != "DUTY" {
+		t.Fatalf("unexpected call type: %s", meta.CallType)
+	}
+
+	expectedTime := time.Date(2025, time.November, 27, 20, 2, 59, 0, loc)
+	if !meta.DateTime.Equal(expectedTime) {
+		t.Fatalf("unexpected datetime: %v", meta.DateTime)
+	}
+}
