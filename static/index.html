@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Call Alerts & Transcriptions</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="page" id="app">
+    <header>
+      <div>
+        <h1>Call Alerts</h1>
+        <p class="muted">Browse, search, and review recent calls with transcripts.</p>
+      </div>
+      <div class="controls">
+        <input id="search" type="search" placeholder="Search filename or transcript..." />
+        <select id="status-filter">
+          <option value="">All Statuses</option>
+          <option value="queued">Queued</option>
+          <option value="processing">Processing</option>
+          <option value="done">Done</option>
+          <option value="error">Error</option>
+        </select>
+        <select id="sort-by">
+          <option value="time">Newest</option>
+          <option value="size">Largest</option>
+          <option value="status">Status</option>
+        </select>
+        <button id="theme-toggle" aria-label="Toggle theme">🌙</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="list">
+        <div class="list-header">
+          <div>Filename</div>
+          <div>Status</div>
+          <div>Updated</div>
+        </div>
+        <div id="items" class="items"></div>
+        <div class="pagination">
+          <button id="prev-page">Prev</button>
+          <span id="page-info"></span>
+          <button id="next-page">Next</button>
+        </div>
+      </section>
+
+      <section class="detail">
+        <div class="detail-header">
+          <div>
+            <h2 id="detail-name">Select a call</h2>
+            <p class="muted" id="detail-meta"></p>
+          </div>
+          <div class="detail-actions">
+            <button id="download-txt" disabled>Download TXT</button>
+            <button id="download-json" disabled>Download JSON</button>
+            <button id="download-srt" disabled>Download SRT</button>
+            <button id="retranscribe" class="secondary" disabled>Retranscribe (no alert)</button>
+          </div>
+        </div>
+        <div class="media">
+          <audio id="player" controls></audio>
+          <canvas id="waveform" height="80"></canvas>
+        </div>
+        <div class="transcript">
+          <div class="transcript-tabs">
+            <button data-tab="clean" class="active">Cleaned</button>
+            <button data-tab="raw">Raw</button>
+            <button data-tab="translation">Translation</button>
+          </div>
+          <div class="transcript-body">
+            <pre id="transcript-text" aria-live="polite">Select a call to view transcript</pre>
+          </div>
+        </div>
+        <div class="similar" id="similar"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
