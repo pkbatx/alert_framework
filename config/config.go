@@ -18,6 +18,7 @@ type Config struct {
 	JobTimeoutSec int
 	GroupMeBotID  string
 	GroupMeToken  string
+	DevUI         bool
 }
 
 const (
@@ -43,6 +44,7 @@ func Load() (Config, error) {
 		JobTimeoutSec: defaultJobTimeoutSec,
 		GroupMeBotID:  os.Getenv("GROUPME_BOT_ID"),
 		GroupMeToken:  os.Getenv("GROUPME_ACCESS_TOKEN"),
+		DevUI:         parseBoolEnv("DEV_UI"),
 	}
 
 	if legacyPort := os.Getenv("PORT"); legacyPort != "" && cfg.HTTPPort == defaultPort {
@@ -130,4 +132,12 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func parseBoolEnv(key string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "1" || v == "true" || v == "yes" || v == "on" {
+		return true
+	}
+	return false
 }

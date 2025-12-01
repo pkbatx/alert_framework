@@ -6,7 +6,7 @@
   <title>Transcription Monitor</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body>
+<body data-dev-mode="__DEV_MODE__" data-default-cleanup="__DEFAULT_CLEANUP__">
   <div class="page">
     <header class="app-header">
       <div>
@@ -54,6 +54,11 @@
       <button id="refresh-btn" class="primary">Refresh</button>
     </section>
 
+    <div class="active-filter-row" aria-live="polite">
+      <span id="active-tag-filter" class="hidden"></span>
+      <span id="active-tag-hint" class="muted hidden">Click a tag to filter the list.</span>
+    </div>
+
     <main class="layout">
       <section class="panel list-panel">
         <div class="panel-header">
@@ -84,6 +89,22 @@
             <div class="stat"><span class="label">Processed</span><strong id="stat-processed"></strong></div>
             <div class="stat"><span class="label">Failed</span><strong id="stat-failed"></strong></div>
           </div>
+          <div class="viz-grid">
+            <div class="viz">
+              <div class="viz-header">
+                <span>Queue fill</span>
+                <strong id="viz-queue-label">--</strong>
+              </div>
+              <div class="viz-bar"><span id="viz-queue"></span></div>
+            </div>
+            <div class="viz">
+              <div class="viz-header">
+                <span>Success ratio</span>
+                <strong id="viz-success-label">--</strong>
+              </div>
+              <div class="viz-bar"><span id="viz-success"></span></div>
+            </div>
+          </div>
           <div class="backfill">
             <div class="panel-subheader">
               <h3>Last Backfill</h3>
@@ -97,7 +118,7 @@
               <div><dt>Already processed</dt><dd id="bf-processed">--</dd></div>
               <div><dt>Unprocessed</dt><dd id="bf-unprocessed">--</dd></div>
             </dl>
-            <div class="backfill-actions">
+            <div class="backfill-actions admin-only">
               <button id="trigger-backfill" class="primary">Run backfill</button>
               <small class="muted" id="backfill-hint">Runs up to the configured backfill limit.</small>
             </div>
@@ -132,7 +153,7 @@
               <h2>Processing Settings</h2>
             </div>
           </div>
-          <form id="settings-form" class="settings-grid">
+          <form id="settings-form" class="settings-grid admin-only">
             <label>Default model
               <select id="setting-model">
                 <option value="whisper-1">whisper-1</option>
@@ -164,9 +185,12 @@
               <textarea id="setting-webhooks" rows="2" placeholder="One URL per line"></textarea>
             </label>
             <label>Cleanup prompt
-              <textarea id="setting-cleanup" rows="3"></textarea>
+              <textarea id="setting-cleanup" rows="3" placeholder="Default cleanup prompt will be used if left blank."></textarea>
             </label>
-            <button type="submit" class="primary">Save settings</button>
+            <div class="settings-actions">
+              <button type="button" id="reset-cleanup" class="ghost">Use default cleanup prompt</button>
+              <button type="submit" class="primary">Save settings</button>
+            </div>
           </form>
         </div>
       </section>

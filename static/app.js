@@ -2,7 +2,13 @@ const state = {
   items: [],
   filtered: [],
   selected: null,
-  activeTab: 'clean'
+  activeTab: 'clean',
+  tagFilter: null,
+};
+
+const flags = {
+  devMode: document.body.dataset.devMode === 'true',
+  defaultCleanup: document.body.dataset.defaultCleanup || '',
 };
 
 const formatTime = (value) => {
@@ -21,7 +27,7 @@ const debounce = (fn, wait = 250) => {
 
 const renderTags = (tags = []) => {
   if (!tags.length) return '';
-  return `<div class="tag-row">${tags.map((t) => `<span class="badge tag">${t}</span>`).join('')}</div>`;
+  return `<div class="tag-row">${tags.map((t) => `<button class="badge tag" data-tag="${t}" type="button">${t}</button>`).join('')}</div>`;
 };
 
 const buildLocationLine = (item) => {
@@ -36,8 +42,11 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('refresh-btn').addEventListener('click', () => { loadList(); loadStatus(); });
   document.getElementById('retry-status').addEventListener('click', loadStatus);
   document.getElementById('settings-form').addEventListener('submit', saveSettings);
+  document.getElementById('reset-cleanup').addEventListener('click', resetCleanupPrompt);
   document.getElementById('trigger-backfill').addEventListener('click', runBackfill);
   setupTabs();
+  setupAdminVisibility();
+  renderTagFilterPill();
   loadList();
   loadStatus();
   loadSettings();
@@ -67,7 +76,14 @@ function renderList() {
   const listEl = document.getElementById('list');
   listEl.innerHTML = '';
   const sourceFilter = document.getElementById('source-filter').value;
-  state.filtered = state.items.filter((item) => !sourceFilter || item.source === sourceFilter);
+  state.filtered = state.items.filter((item) => {
+    if (sourceFilter && item.source !== sourceFilter) return false;
+    if (state.tagFilter) {
+      const tags = Array.isArray(item.tags) ? item.tags : [];
+      if (!tags.includes(state.tagFilter)) return false;
+    }
+    return true;
+  });
 
   if (!state.filtered.length) {
     document.getElementById('empty-state').classList.remove('hidden');
@@ -101,6 +117,12 @@ function renderList() {
       </div>
     `;
     card.addEventListener('click', () => selectItem(item));
+    card.querySelectorAll('.badge.tag').forEach((tagBtn) => {
+      tagBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleTagFilter(tagBtn.dataset.tag);
+      });
+    });
     listEl.appendChild(card);
   });
 }
@@ -218,10 +240,26 @@ async function loadStatus() {
     document.getElementById('stat-workers').textContent = data.workers ?? '--';
     document.getElementById('stat-processed').textContent = data.processed_jobs ?? '--';
     document.getElementById('stat-failed').textContent = data.failed_jobs ?? '--';
+    renderViz(data);
     renderBackfill(data.has_backfill ? data.last_backfill : null, data.backfill_running);
   } catch (e) {
     document.getElementById('backfill-caption').textContent = 'Unable to load status right now.';
   }
+}
+
+function renderViz(data) {
+  const capacity = Number(data.capacity) || 0;
+  const length = Number(data.length) || 0;
+  const processed = Number(data.processed_jobs) || 0;
+  const failed = Number(data.failed_jobs) || 0;
+  const queuePct = capacity > 0 ? Math.min(100, Math.round((length / capacity) * 100)) : 0;
+  const successDenom = processed + failed;
+  const successPct = successDenom > 0 ? Math.round(((processed - failed) / successDenom) * 100) : 0;
+
+  document.getElementById('viz-queue-label').textContent = capacity ? `${queuePct}% full` : '--';
+  document.getElementById('viz-success-label').textContent = successDenom ? `${successPct}% success` : '--';
+  document.getElementById('viz-queue').style.width = `${queuePct}%`;
+  document.getElementById('viz-success').style.width = `${Math.max(0, Math.min(100, successPct))}%`;
 }
 
 function renderBackfill(summary, busy = false) {
@@ -270,10 +308,14 @@ async function loadSettings() {
     document.getElementById('setting-format').value = data.DefaultFormat || 'json';
     document.getElementById('setting-auto').checked = !!data.AutoTranslate;
     document.getElementById('setting-webhooks').value = (data.WebhookEndpoints || []).join('\n');
-    document.getElementById('setting-cleanup').value = data.CleanupPrompt || '';
+    document.getElementById('setting-cleanup').value = data.CleanupPrompt || flags.defaultCleanup;
   } catch (e) {
-    // ignore
+    document.getElementById('setting-cleanup').value = flags.defaultCleanup;
   }
+}
+
+function resetCleanupPrompt() {
+  document.getElementById('setting-cleanup').value = flags.defaultCleanup;
 }
 
 async function saveSettings(e) {
@@ -284,7 +326,37 @@ async function saveSettings(e) {
     DefaultFormat: document.getElementById('setting-format').value,
     AutoTranslate: document.getElementById('setting-auto').checked,
     WebhookEndpoints: document.getElementById('setting-webhooks').value.split('\n').map((v) => v.trim()).filter(Boolean),
-    CleanupPrompt: document.getElementById('setting-cleanup').value,
+    CleanupPrompt: document.getElementById('setting-cleanup').value || flags.defaultCleanup,
   };
   await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+}
+
+function toggleTagFilter(tag) {
+  state.tagFilter = state.tagFilter === tag ? null : tag;
+  renderTagFilterPill();
+  renderList();
+}
+
+function renderTagFilterPill() {
+  const pill = document.getElementById('active-tag-filter');
+  const hint = document.getElementById('active-tag-hint');
+  if (state.tagFilter) {
+    pill.textContent = `Filtering by tag: ${state.tagFilter}`;
+    pill.className = 'badge tag';
+    pill.onclick = () => toggleTagFilter(state.tagFilter);
+    hint.classList.remove('hidden');
+  } else {
+    pill.textContent = '';
+    pill.className = 'hidden';
+    pill.onclick = null;
+    hint.classList.add('hidden');
+  }
+}
+
+function setupAdminVisibility() {
+  if (flags.devMode) return;
+  document.querySelectorAll('.admin-only').forEach((el) => {
+    el.classList.add('hidden');
+    el.setAttribute('aria-hidden', 'true');
+  });
 }
