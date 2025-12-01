@@ -294,9 +294,12 @@ func initDB(db *sql.DB) error {
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS app_settings (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        default_model TEXT,
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    default_model TEXT,
         default_mode TEXT,
         default_format TEXT,
         auto_translate INTEGER DEFAULT 0,
@@ -309,7 +312,7 @@ func initDB(db *sql.DB) error {
     `); err != nil {
 		return err
 	}
-	rows, err := db.Query("PRAGMA table_info(app_settings);")
+	rows, err = db.Query("PRAGMA table_info(app_settings);")
 	if err != nil {
 		return err
 	}
@@ -326,6 +329,9 @@ func initDB(db *sql.DB) error {
 		if name == "cleanup_prompt" {
 			hasCleanup = true
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 	if !hasCleanup {
 		if _, err := db.Exec(`ALTER TABLE app_settings ADD COLUMN cleanup_prompt TEXT`); err != nil {
