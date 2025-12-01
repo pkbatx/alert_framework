@@ -26,6 +26,9 @@ import (
 	"syscall"
 	"time"
 
+	"alert_framework/backfill"
+	"alert_framework/config"
+	"alert_framework/queue"
 	"github.com/fsnotify/fsnotify"
 	_ "modernc.org/sqlite"
 )
@@ -107,7 +110,7 @@ type similar struct {
 	Score    float64 `json:"score"`
 }
 
-type job struct {
+type processJob struct {
 	filename    string
 	sendGroupMe bool
 	force       bool
@@ -134,13 +137,13 @@ type AppSettings struct {
 }
 
 type server struct {
-	db          *sql.DB
-	jobs        chan job
-	running     sync.Map // filename -> struct{}
-	client      *http.Client
-	botID       string
-	workerCount int
-	shutdown    chan struct{}
+	db       *sql.DB
+	queue    *queue.Queue
+	running  sync.Map // filename -> struct{}
+	client   *http.Client
+	botID    string
+	shutdown chan struct{}
+	cfg      config.Config
 }
 
 func (s *server) defaultOptions() (TranscriptionOptions, error) {
@@ -158,6 +161,11 @@ func (s *server) defaultOptions() (TranscriptionOptions, error) {
 }
 
 func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("config error: %v", err)
+	}
+
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		log.Fatalf("failed to ensure work dir: %v", err)
 	}
@@ -167,48 +175,43 @@ func main() {
 		log.Fatalf("init db: %v", err)
 	}
 
-	workerCount := 4
-	if v := os.Getenv("WORKER_COUNT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			workerCount = n
-		}
-	}
-
 	s := &server{
-		db:          db,
-		jobs:        make(chan job, 200),
-		client:      &http.Client{Timeout: 180 * time.Second},
-		botID:       getBotID(),
-		workerCount: workerCount,
-		shutdown:    make(chan struct{}),
+		db:       db,
+		client:   &http.Client{Timeout: 180 * time.Second},
+		botID:    getBotID(),
+		shutdown: make(chan struct{}),
+		cfg:      cfg,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	for i := 0; i < s.workerCount; i++ {
-		go s.worker()
-	}
-	go s.runStartupSync()
+	s.queue = queue.New(cfg.JobQueueSize, cfg.WorkerCount, time.Duration(cfg.JobTimeoutSec)*time.Second)
+	s.queue.Start(ctx)
+
 	go s.watch()
+	backfill.Run(ctx, s, cfg.BackfillLimit)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/transcriptions", s.handleTranscriptions)
 	mux.HandleFunc("/api/transcription/", s.handleTranscription)
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/", s.handleRoot)
 
 	server := &http.Server{
-		Addr:    ":" + getPort(),
+		Addr:    ":" + cfg.HTTPPort,
 		Handler: mux,
 	}
 
 	go func() {
 		<-ctx.Done()
 		close(s.shutdown)
-		ctxTimeout, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctxTimeout, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		s.queue.Stop(ctxTimeout)
 		_ = server.Shutdown(ctxTimeout)
 	}()
 
@@ -216,13 +219,6 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server error: %v", err)
 	}
-}
-
-func getPort() string {
-	if v := os.Getenv("PORT"); v != "" {
-		return v
-	}
-	return "8000"
 }
 
 func getBotID() string {
@@ -530,64 +526,46 @@ func (s *server) runPretty(filename string) string {
 	return trimmed
 }
 
-func (s *server) queueJob(filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) {
+func (s *server) queueJob(filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) bool {
 	if _, exists := s.running.LoadOrStore(filename, struct{}{}); exists && !force {
-		return
+		return false
 	}
-	select {
-	case s.jobs <- job{filename: filename, sendGroupMe: sendGroupMe, force: force, options: opts}:
-	default:
-		log.Printf("job queue full, dropping job for %s", filename)
-		s.running.Delete(filename)
-	}
-}
-
-func (s *server) queueBackfillJob(filename string, force bool, opts TranscriptionOptions) {
-	if _, exists := s.running.LoadOrStore(filename, struct{}{}); exists && !force {
-		return
-	}
-	for {
-		select {
-		case s.jobs <- job{filename: filename, sendGroupMe: false, force: force, options: opts}:
-			return
-		case <-s.shutdown:
+	job := queue.Job{
+		ID: filename,
+		Work: func(ctx context.Context) error {
+			return s.processFile(ctx, processJob{filename: filename, sendGroupMe: sendGroupMe, force: force, options: opts})
+		},
+		OnFinish: func(err error) {
 			s.running.Delete(filename)
-			return
-		}
+		},
 	}
-}
-
-func (s *server) worker() {
-	for j := range s.jobs {
-		if err := s.processFile(j); err != nil {
-			log.Printf("process %s error: %v", j.filename, err)
-		}
-		s.running.Delete(j.filename)
+	if !s.queue.Enqueue(job) {
+		s.running.Delete(filename)
+		return false
 	}
+	return true
 }
 
-func (s *server) runStartupSync() {
-	log.Printf("running startup backfill and catch-up")
-	s.backfillRecentFiles()
-	s.catchupPending()
-}
-
-func (s *server) backfillRecentFiles() {
+func (s *server) ListCandidates(ctx context.Context) ([]backfill.Record, error) {
 	entries, err := os.ReadDir(callsDir)
 	if err != nil {
-		log.Printf("backfill scan failed: %v", err)
-		return
+		return nil, err
 	}
-	opts, err := s.defaultOptions()
-	if err != nil {
-		log.Printf("using default options with error: %v", err)
+	statusMap := make(map[string]backfill.Record)
+	rows, err := queryWithRetry(s.db, `SELECT filename, status, updated_at FROM transcriptions`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var filename, status string
+			var updatedAt time.Time
+			if err := rows.Scan(&filename, &status, &updatedAt); err != nil {
+				continue
+			}
+			statusMap[filename] = backfill.Record{Filename: filename, Status: status, UpdatedAt: updatedAt}
+		}
 	}
-	type fileMeta struct {
-		name    string
-		modTime time.Time
-		size    int64
-	}
-	var files []fileMeta
+
+	records := make([]backfill.Record, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -596,102 +574,49 @@ func (s *server) backfillRecentFiles() {
 		if err != nil {
 			continue
 		}
-		files = append(files, fileMeta{name: entry.Name(), modTime: info.ModTime(), size: info.Size()})
-	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.After(files[j].modTime)
-	})
-	if len(files) > 200 {
-		files = files[:200]
-	}
-	var inspected, queued int
-	for _, file := range files {
-		inspected++
-		filename := file.name
-		sourcePath := filepath.Join(callsDir, filename)
-		existing, err := s.getTranscription(filename)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			log.Printf("backfill lookup failed for %s: %v", filename, err)
-			continue
+		rec := backfill.Record{
+			Filename:  entry.Name(),
+			ModTime:   info.ModTime(),
+			SizeBytes: info.Size(),
 		}
-		if existing == nil {
-			if err := s.markQueued(filename, sourcePath, file.size, opts); err != nil {
-				log.Printf("mark queued failed for %s: %v", filename, err)
-			}
-			s.queueBackfillJob(filename, false, opts)
-			queued++
-			continue
+		if st, ok := statusMap[rec.Filename]; ok {
+			rec.Status = st.Status
+			rec.UpdatedAt = st.UpdatedAt
 		}
-		switch existing.Status {
-		case statusDone:
-			continue
-		case statusError:
-			if err := s.markQueued(filename, sourcePath, file.size, opts); err != nil {
-				log.Printf("requeue failed for %s: %v", filename, err)
-			}
-			s.queueBackfillJob(filename, true, opts)
-			queued++
-		case statusQueued, statusProcessing:
-			continue
-		}
+		records = append(records, rec)
 	}
-	log.Printf("backfill inspected %d recent files, queued %d", inspected, queued)
+	return records, nil
 }
 
-func (s *server) catchupPending() {
-	rows, err := queryWithRetry(s.db, `SELECT filename, status, updated_at FROM transcriptions WHERE status != ?`, statusDone)
-	if err != nil {
-		log.Printf("catch-up query failed: %v", err)
-		return
+func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) bool {
+	if rec.Status == statusDone {
+		return false
 	}
-	defer rows.Close()
+	stale := time.Since(rec.UpdatedAt) > processingStaleAfter
+	if rec.Status == statusProcessing && !stale {
+		return false
+	}
+	if rec.Status == statusQueued && !stale {
+		return false
+	}
+	force := rec.Status == statusProcessing && stale
 	opts, err := s.defaultOptions()
 	if err != nil {
 		log.Printf("using default options with error: %v", err)
 	}
-	var queued int
-	for rows.Next() {
-		var filename, status string
-		var updatedAt time.Time
-		if err := rows.Scan(&filename, &status, &updatedAt); err != nil {
-			continue
-		}
-		sourcePath := filepath.Join(callsDir, filename)
-		exists := fileExists(sourcePath)
-		if !exists {
-			staged := filepath.Join(workDir, filename)
-			exists = fileExists(staged)
-		}
-		if !exists {
-			continue
-		}
-		requeue := false
-		force := false
-		switch status {
-		case statusQueued, statusError:
-			requeue = true
-		case statusProcessing:
-			if time.Since(updatedAt) > processingStaleAfter {
-				requeue = true
-				force = true
-			}
-		}
-		if requeue {
-			var size int64
-			if info, err := os.Stat(sourcePath); err == nil {
-				size = info.Size()
-			}
-			if err := s.markQueued(filename, sourcePath, size, opts); err != nil {
-				log.Printf("catch-up queue update failed for %s: %v", filename, err)
-			}
-			s.queueBackfillJob(filename, force, opts)
-			queued++
-		}
+	sourcePath := filepath.Join(callsDir, rec.Filename)
+	if err := s.markQueued(rec.Filename, sourcePath, rec.SizeBytes, opts); err != nil {
+		log.Printf("mark queued failed for %s: %v", rec.Filename, err)
+		return false
 	}
-	log.Printf("catch-up queued %d pending jobs", queued)
+	enqueued := s.queueJob(rec.Filename, false, force, opts)
+	if !enqueued {
+		log.Printf("backfill queue full for %s", rec.Filename)
+	}
+	return enqueued
 }
 
-func (s *server) processFile(j job) error {
+func (s *server) processFile(ctx context.Context, j processJob) error {
 	filename := j.filename
 	sourcePath := filepath.Join(callsDir, filename)
 	info, err := os.Stat(sourcePath)
@@ -710,7 +635,7 @@ func (s *server) processFile(j job) error {
 	if err := s.markProcessing(filename, sourcePath, info.Size(), j.options); err != nil {
 		return err
 	}
-	if err := waitForStableSize(sourcePath, info.Size(), 2*time.Second, 2); err != nil {
+	if err := waitForStableSize(ctx, sourcePath, info.Size(), 2*time.Second, 2); err != nil {
 		s.markError(filename, err)
 		return err
 	}
@@ -775,13 +700,18 @@ func (s *server) processFile(j job) error {
 	return nil
 }
 
-func waitForStableSize(path string, initial int64, interval time.Duration, required int) error {
+func waitForStableSize(ctx context.Context, path string, initial int64, interval time.Duration, required int) error {
 	if initial <= 0 {
 		time.Sleep(interval)
 	}
 	var last int64 = -1
 	stable := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		info, err := os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("stat: %w", err)
@@ -1296,6 +1226,24 @@ func (s *server) sendGroupMe(text string) error {
 		return fmt.Errorf("groupme status %d: %s", resp.StatusCode, string(b))
 	}
 	return nil
+}
+
+func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.PingContext(r.Context()); err != nil {
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.queue.Healthy() {
+		http.Error(w, "queue not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ready"))
 }
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
