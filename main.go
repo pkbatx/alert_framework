@@ -37,7 +37,6 @@ import (
 var embeddedStatic embed.FS
 
 const (
-	callsDir   = "/home/peebs/calls"
 	workDir    = "/home/peebs/ai_transcribe"
 	dbPath     = workDir + "/transcriptions.db"
 	groupmeURL = "https://api.groupme.com/v3/bots/post"
@@ -82,6 +81,7 @@ type transcription struct {
 	ID                   int64     `json:"id"`
 	Filename             string    `json:"filename"`
 	SourcePath           string    `json:"source_path"`
+	Source               string    `json:"source"`
 	Transcript           *string   `json:"transcript_text"`
 	RawTranscript        *string   `json:"raw_transcript_text"`
 	CleanTranscript      *string   `json:"clean_transcript_text"`
@@ -112,6 +112,7 @@ type similar struct {
 
 type processJob struct {
 	filename    string
+	source      string
 	sendGroupMe bool
 	force       bool
 	options     TranscriptionOptions
@@ -168,6 +169,9 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
+	if err := os.MkdirAll(cfg.CallsDir, 0755); err != nil {
+		log.Fatalf("failed to ensure calls dir: %v", err)
+	}
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		log.Fatalf("failed to ensure work dir: %v", err)
 	}
@@ -180,7 +184,7 @@ func main() {
 	s := &server{
 		db:       db,
 		client:   &http.Client{Timeout: 180 * time.Second},
-		botID:    getBotID(),
+		botID:    getBotID(cfg),
 		shutdown: make(chan struct{}),
 		cfg:      cfg,
 	}
@@ -206,7 +210,7 @@ func main() {
 	mux.HandleFunc("/", s.handleRoot)
 
 	server := &http.Server{
-		Addr:    ":" + cfg.HTTPPort,
+		Addr:    cfg.HTTPPort,
 		Handler: mux,
 	}
 
@@ -225,7 +229,10 @@ func main() {
 	}
 }
 
-func getBotID() string {
+func getBotID(cfg config.Config) string {
+	if cfg.GroupMeBotID != "" {
+		return cfg.GroupMeBotID
+	}
 	if v := os.Getenv("GROUPME_BOT_ID"); v != "" {
 		return v
 	}
@@ -315,6 +322,7 @@ func initDB(db *sql.DB) error {
 	}
 	migrations := []migration{
 		{version: 1, name: "baseline schema", up: migrateBaseline},
+		{version: 2, name: "add ingest source", up: migrateAddIngestSource},
 	}
 	return applyMigrations(db, migrations)
 }
@@ -362,6 +370,7 @@ func migrateBaseline(db *sql.DB) error {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     filename TEXT UNIQUE NOT NULL,
     source_path TEXT NOT NULL,
+    ingest_source TEXT NULL,
     transcript_text TEXT NULL,
     raw_transcript_text TEXT NULL,
     clean_transcript_text TEXT NULL,
@@ -440,6 +449,17 @@ default_model TEXT,
 	return nil
 }
 
+func migrateAddIngestSource(db *sql.DB) error {
+	if _, err := execWithRetry(db, "ALTER TABLE transcriptions ADD COLUMN ingest_source TEXT"); err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "duplicate column name") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 func addColumnIfMissing(db *sql.DB, table, column, colType string) error {
 	rows, err := queryWithRetry(db, fmt.Sprintf("PRAGMA table_info(%s);", table))
 	if err != nil {
@@ -479,11 +499,11 @@ func (s *server) watch() {
 	}
 	defer watcher.Close()
 
-	if err := watcher.Add(callsDir); err != nil {
+	if err := watcher.Add(s.cfg.CallsDir); err != nil {
 		log.Fatalf("watch add: %v", err)
 	}
 
-	log.Printf("watching %s for new files", callsDir)
+	log.Printf("watching %s for new files", s.cfg.CallsDir)
 	for {
 		select {
 		case evt, ok := <-watcher.Events:
@@ -543,7 +563,7 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 		ID:     filename,
 		Source: source,
 		Work: func(ctx context.Context) error {
-			return s.processFile(ctx, processJob{filename: filename, sendGroupMe: sendGroupMe, force: force, options: opts})
+			return s.processFile(ctx, processJob{filename: filename, source: source, sendGroupMe: sendGroupMe, force: force, options: opts})
 		},
 		OnFinish: func(err error) {
 			s.running.Delete(filename)
@@ -559,7 +579,7 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 }
 
 func (s *server) ListCandidates(ctx context.Context) ([]backfill.Record, error) {
-	entries, err := os.ReadDir(callsDir)
+	entries, err := os.ReadDir(s.cfg.CallsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -604,8 +624,8 @@ func (s *server) OnBackfillComplete(summary backfill.Summary) {
 	s.summaryMu.Lock()
 	s.lastBackfillSummary = summary
 	s.summaryMu.Unlock()
-	if summary.EnqueueDroppedFull > 0 {
-		log.Printf("backfill dropped %d jobs because queue remained full", summary.EnqueueDroppedFull)
+	if summary.DroppedFull > 0 {
+		log.Printf("backfill dropped %d jobs because queue remained full", summary.DroppedFull)
 	}
 }
 
@@ -615,38 +635,46 @@ func (s *server) getBackfillSummary() backfill.Summary {
 	return s.lastBackfillSummary
 }
 
-func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) backfill.EnqueueResult {
+func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) (backfill.EnqueueResult, error) {
 	if rec.Status == statusDone {
-		return backfill.EnqueueResult{}
+		return backfill.EnqueueResult{}, nil
 	}
 	stale := time.Since(rec.UpdatedAt) > processingStaleAfter
 	if rec.Status == statusProcessing && !stale {
-		return backfill.EnqueueResult{}
+		return backfill.EnqueueResult{}, nil
 	}
 	if rec.Status == statusQueued && !stale {
-		return backfill.EnqueueResult{}
+		return backfill.EnqueueResult{}, nil
 	}
 	force := rec.Status == statusProcessing && stale
 	opts, err := s.defaultOptions()
 	if err != nil {
 		log.Printf("using default options with error: %v", err)
 	}
-	sourcePath := filepath.Join(callsDir, rec.Filename)
-	if err := s.markQueued(rec.Filename, sourcePath, rec.SizeBytes, opts); err != nil {
+	sourcePath := filepath.Join(s.cfg.CallsDir, rec.Filename)
+	if err := s.markQueued(rec.Filename, sourcePath, "backfill", rec.SizeBytes, opts); err != nil {
 		log.Printf("mark queued failed for %s: %v", rec.Filename, err)
-		return backfill.EnqueueResult{}
+		return backfill.EnqueueResult{}, err
 	}
 	enqueued, dropped := s.enqueueWithBackoff(ctx, "backfill", rec.Filename, false, force, opts)
-	return backfill.EnqueueResult{Enqueued: enqueued, DroppedFull: dropped}
+	return backfill.EnqueueResult{Enqueued: enqueued, DroppedFull: dropped}, nil
 }
 
 func (s *server) processFile(ctx context.Context, j processJob) error {
 	filename := j.filename
-	sourcePath := filepath.Join(callsDir, filename)
+	sourcePath := filepath.Join(s.cfg.CallsDir, filename)
 	info, err := os.Stat(sourcePath)
 	if err != nil {
 		return fmt.Errorf("stat source: %w", err)
 	}
+	start := time.Now()
+	decodeStart := start
+	var decodeDur, transcribeDur, notifyDur time.Duration
+	status := "success"
+	defer func() {
+		log.Printf("job_source=%s file=%s total=%.2fs decode=%.2fs transcribe=%.2fs notify=%.2fs status=%s", j.source, filename, time.Since(start).Seconds(), decodeDur.Seconds(), transcribeDur.Seconds(), notifyDur.Seconds(), status)
+	}()
+
 	var existingEntry *transcription
 	if existing, err := s.getTranscription(filename); err == nil {
 		existingEntry = existing
@@ -656,11 +684,14 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			}
 		}
 	}
-	if err := s.markProcessing(filename, sourcePath, info.Size(), j.options); err != nil {
+	if err := s.markProcessing(filename, sourcePath, j.source, info.Size(), j.options); err != nil {
+		status = err.Error()
 		return err
 	}
 	if err := waitForStableSize(ctx, sourcePath, info.Size(), 2*time.Second, 2); err != nil {
 		s.markError(filename, err)
+		status = err.Error()
+		decodeDur = time.Since(decodeStart)
 		return err
 	}
 
@@ -668,6 +699,8 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	hashValue, err := hashFile(sourcePath)
 	if err != nil {
 		s.markError(filename, err)
+		status = err.Error()
+		decodeDur = time.Since(decodeStart)
 		return err
 	}
 
@@ -676,7 +709,6 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	}
 
 	if dup := s.findDuplicate(hashValue, filename); dup != "" {
-		// copy transcript data from duplicate
 		if err := s.copyFromDuplicate(filename, dup); err != nil {
 			log.Printf("failed to mirror duplicate data: %v", err)
 		}
@@ -692,21 +724,30 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	stagedPath := filepath.Join(workDir, filename)
 	if err := copyFile(sourcePath, stagedPath); err != nil {
 		s.markError(filename, err)
+		status = err.Error()
+		decodeDur = time.Since(decodeStart)
 		return err
 	}
+	decodeDur = time.Since(decodeStart)
 
+	transcribeStart := time.Now()
 	rawTranscript, cleanedTranscript, translation, embedding, diarized, towns, normalized, actualModel, callType, err := s.multiPassTranscription(stagedPath, j.options)
 	if err != nil {
 		s.markError(filename, err)
+		status = err.Error()
+		transcribeDur = time.Since(transcribeStart)
 		return err
 	}
+	transcribeDur = time.Since(transcribeStart)
 	if callType == nil && existingEntry != nil && existingEntry.CallType != nil {
 		callType = existingEntry.CallType
 	}
 
 	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType); err != nil {
+		status = err.Error()
 		return err
 	}
+	notifyStart := time.Now()
 	if len(embedding) > 0 {
 		if err := s.storeEmbedding(filename, embedding); err != nil {
 			log.Printf("store embedding: %v", err)
@@ -721,6 +762,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			log.Printf("groupme follow-up failed: %v", err)
 		}
 	}
+	notifyDur = time.Since(notifyStart)
 	return nil
 }
 
@@ -1278,11 +1320,12 @@ func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
 	stats := s.queue.Stats()
 	summary := s.getBackfillSummary()
 	respondJSON(w, map[string]interface{}{
-		"current_queue_len":     stats.Length,
-		"job_queue_size":        stats.Capacity,
-		"worker_count":          stats.WorkerCount,
-		"processed_jobs":        stats.Processed,
-		"last_backfill_summary": summary,
+		"length":         stats.Length,
+		"capacity":       stats.Capacity,
+		"workers":        stats.WorkerCount,
+		"processed_jobs": stats.Processed,
+		"failed_jobs":    stats.Failed,
+		"last_backfill":  summary,
 	})
 }
 
@@ -1362,7 +1405,7 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	sourcePath := filepath.Join(callsDir, cleaned)
+	sourcePath := filepath.Join(s.cfg.CallsDir, cleaned)
 	if _, err := os.Stat(sourcePath); err != nil {
 		if os.IsNotExist(err) {
 			http.NotFound(w, r)
@@ -1423,7 +1466,7 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	sourcePath := filepath.Join(callsDir, cleaned)
+	sourcePath := filepath.Join(s.cfg.CallsDir, cleaned)
 	if _, err := os.Stat(sourcePath); err != nil {
 		http.NotFound(w, r)
 		return
@@ -1600,7 +1643,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	offset := (page - 1) * pageSize
 
-	base := `SELECT id, filename, source_path, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions`
+	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions`
 	var where []string
 	var args []interface{}
 	if search != "" {
@@ -1645,7 +1688,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	var result []transcription
 	for rows.Next() {
 		var t transcription
-		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
@@ -1720,25 +1763,25 @@ func (s *server) saveSettings(settings AppSettings) error {
 func (s *server) getTranscription(filename string) (*transcription, error) {
 	var t transcription
 	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
-		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt)
-	}, `SELECT id, filename, source_path, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
+		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt)
+	}, `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
 		return nil, err
 	}
 	return &t, nil
 }
 
-func (s *server) markQueued(filename, sourcePath string, size int64, opts TranscriptionOptions) error {
+func (s *server) markQueued(filename, sourcePath, source string, size int64, opts TranscriptionOptions) error {
 	var sizeVal interface{}
 	if size > 0 {
 		sizeVal = size
 	}
-	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format)`, filename, sourcePath, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format)
+	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format)`, filename, sourcePath, source, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format)
 	return err
 }
 
-func (s *server) markProcessing(filename, sourcePath string, size int64, opts TranscriptionOptions) error {
-	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format`, filename, sourcePath, statusProcessing, size, opts.Model, opts.Mode, opts.Format)
+func (s *server) markProcessing(filename, sourcePath, source string, size int64, opts TranscriptionOptions) error {
+	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format`, filename, sourcePath, source, statusProcessing, size, opts.Model, opts.Mode, opts.Format)
 	return err
 }
 
