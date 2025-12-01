@@ -153,6 +153,17 @@ type server struct {
 	tz       *time.Location
 }
 
+// QueueDebugResponse represents the payload returned from /debug/queue.
+type QueueDebugResponse struct {
+	Length        int                   `json:"length"`
+	Capacity      int                   `json:"capacity"`
+	Workers       int                   `json:"workers"`
+	ProcessedJobs int64                 `json:"processed_jobs"`
+	FailedJobs    int64                 `json:"failed_jobs"`
+	LastBackfill  metrics.BackfillStats `json:"last_backfill"`
+	HasBackfill   bool                  `json:"has_backfill"`
+}
+
 func (s *server) defaultOptions() (TranscriptionOptions, error) {
 	settings, err := s.loadSettings()
 	if err != nil {
@@ -1331,19 +1342,21 @@ func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
 	stats := s.queue.Stats()
 	s.metrics.UpdateQueue(stats.Length, stats.Capacity, stats.WorkerCount)
 	snapshot := s.metrics.Snapshot()
-	var last interface{}
-	if snapshot.HasBackfillRun {
-		last = snapshot.LastBackfill
+	resp := QueueDebugResponse{
+		Length:        stats.Length,
+		Capacity:      stats.Capacity,
+		Workers:       stats.WorkerCount,
+		ProcessedJobs: snapshot.ProcessedJobs,
+		FailedJobs:    snapshot.FailedJobs,
+		LastBackfill:  snapshot.LastBackfill,
+		HasBackfill:   snapshot.HasBackfillRun,
 	}
-	respondJSON(w, map[string]interface{}{
-		"length":         snapshot.QueueLength,
-		"capacity":       snapshot.QueueCapacity,
-		"workers":        snapshot.WorkerCount,
-		"processed_jobs": snapshot.ProcessedJobs,
-		"failed_jobs":    snapshot.FailedJobs,
-		"last_backfill":  last,
-		"has_backfill":   snapshot.HasBackfillRun,
-	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("failed to write debug queue response: %v", err)
+	}
 }
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {

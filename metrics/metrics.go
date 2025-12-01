@@ -16,7 +16,7 @@ type Metrics struct {
 	failedJobs    int64
 
 	mu             sync.RWMutex
-	lastBackfill   backfill.Summary
+	lastBackfill   BackfillStats
 	hasBackfillRun atomic.Bool
 }
 
@@ -27,9 +27,12 @@ type Snapshot struct {
 	WorkerCount    int
 	ProcessedJobs  int64
 	FailedJobs     int64
-	LastBackfill   backfill.Summary
+	LastBackfill   BackfillStats
 	HasBackfillRun bool
 }
+
+// BackfillStats mirrors the backfill summary for reporting.
+type BackfillStats = backfill.Summary
 
 // New creates a zeroed Metrics instance.
 func New() *Metrics {
@@ -52,7 +55,7 @@ func (m *Metrics) RecordJobCompletion(err error) {
 }
 
 // SetBackfill marks the most recent backfill summary.
-func (m *Metrics) SetBackfill(summary backfill.Summary) {
+func (m *Metrics) SetBackfill(summary BackfillStats) {
 	m.mu.Lock()
 	m.lastBackfill = summary
 	m.mu.Unlock()
