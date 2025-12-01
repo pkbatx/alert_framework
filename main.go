@@ -41,6 +41,19 @@ const (
 	defaultBot = "03926cdc985a046b27d6393ba6"
 )
 
+var (
+	allowedFormats = map[string][]string{
+		"whisper-1":                 {"json", "text", "srt", "verbose_json", "vtt"},
+		"gpt-4o-mini-transcribe":    {"json", "text"},
+		"gpt-4o-transcribe":         {"json", "text"},
+		"gpt-4o-transcribe-diarize": {"json", "text", "diarized_json"},
+	}
+	allowedExtensions = map[string]struct{}{
+		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
+	}
+	sussexTowns = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
+)
+
 // transcription statuses
 const (
 	statusQueued     = "queued"
@@ -52,22 +65,30 @@ const (
 // DTOs
 
 type transcription struct {
-	ID              int64     `json:"id"`
-	Filename        string    `json:"filename"`
-	SourcePath      string    `json:"source_path"`
-	Transcript      *string   `json:"transcript_text"`
-	RawTranscript   *string   `json:"raw_transcript_text"`
-	CleanTranscript *string   `json:"clean_transcript_text"`
-	Translation     *string   `json:"translation_text"`
-	Status          string    `json:"status"`
-	LastError       *string   `json:"last_error"`
-	SizeBytes       *int64    `json:"size_bytes"`
-	DurationSeconds *float64  `json:"duration_seconds"`
-	Hash            *string   `json:"hash"`
-	DuplicateOf     *string   `json:"duplicate_of"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-	Similar         []similar `json:"similar,omitempty"`
+	ID                   int64     `json:"id"`
+	Filename             string    `json:"filename"`
+	SourcePath           string    `json:"source_path"`
+	Transcript           *string   `json:"transcript_text"`
+	RawTranscript        *string   `json:"raw_transcript_text"`
+	CleanTranscript      *string   `json:"clean_transcript_text"`
+	Translation          *string   `json:"translation_text"`
+	Status               string    `json:"status"`
+	LastError            *string   `json:"last_error"`
+	SizeBytes            *int64    `json:"size_bytes"`
+	DurationSeconds      *float64  `json:"duration_seconds"`
+	Hash                 *string   `json:"hash"`
+	DuplicateOf          *string   `json:"duplicate_of"`
+	RequestedModel       *string   `json:"requested_model"`
+	RequestedMode        *string   `json:"requested_mode"`
+	RequestedFormat      *string   `json:"requested_format"`
+	ActualModel          *string   `json:"actual_openai_model_used"`
+	DiarizedJSON         *string   `json:"diarized_json"`
+	RecognizedTowns      *string   `json:"recognized_towns"`
+	NormalizedTranscript *string   `json:"normalized_transcript"`
+	CallType             *string   `json:"call_type"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+	Similar              []similar `json:"similar,omitempty"`
 }
 
 type similar struct {
@@ -79,6 +100,25 @@ type job struct {
 	filename    string
 	sendGroupMe bool
 	force       bool
+	options     TranscriptionOptions
+}
+
+type TranscriptionOptions struct {
+	Model         string
+	Mode          string
+	Format        string
+	LanguageHint  string
+	Prompt        string
+	AutoTranslate bool
+}
+
+type AppSettings struct {
+	DefaultModel      string
+	DefaultMode       string
+	DefaultFormat     string
+	AutoTranslate     bool
+	WebhookEndpoints  []string
+	PreferredLanguage string
 }
 
 type server struct {
@@ -89,6 +129,20 @@ type server struct {
 	botID       string
 	workerCount int
 	shutdown    chan struct{}
+}
+
+func (s *server) defaultOptions() (TranscriptionOptions, error) {
+	settings, err := s.loadSettings()
+	if err != nil {
+		return TranscriptionOptions{Model: "gpt-4o-transcribe", Mode: "transcribe", Format: "json"}, err
+	}
+	return TranscriptionOptions{
+		Model:         settings.DefaultModel,
+		Mode:          settings.DefaultMode,
+		Format:        settings.DefaultFormat,
+		LanguageHint:  settings.PreferredLanguage,
+		AutoTranslate: settings.AutoTranslate,
+	}, nil
 }
 
 func main() {
@@ -132,6 +186,7 @@ func main() {
 	mux.HandleFunc("/api/transcriptions", s.handleTranscriptions)
 	mux.HandleFunc("/api/transcription/", s.handleTranscription)
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
+	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/", s.handleRoot)
 
 	server := &http.Server{
@@ -196,14 +251,22 @@ func initDB(db *sql.DB) error {
 	}
 	// legacy compatibility: ensure columns exist
 	needed := map[string]string{
-		"raw_transcript_text":   "TEXT",
-		"clean_transcript_text": "TEXT",
-		"translation_text":      "TEXT",
-		"size_bytes":            "INTEGER",
-		"duration_seconds":      "REAL",
-		"hash":                  "TEXT",
-		"duplicate_of":          "TEXT",
-		"embedding":             "TEXT",
+		"raw_transcript_text":      "TEXT",
+		"clean_transcript_text":    "TEXT",
+		"translation_text":         "TEXT",
+		"size_bytes":               "INTEGER",
+		"duration_seconds":         "REAL",
+		"hash":                     "TEXT",
+		"duplicate_of":             "TEXT",
+		"embedding":                "TEXT",
+		"requested_model":          "TEXT",
+		"requested_mode":           "TEXT",
+		"requested_format":         "TEXT",
+		"actual_openai_model_used": "TEXT",
+		"diarized_json":            "TEXT",
+		"recognized_towns":         "TEXT",
+		"normalized_transcript":    "TEXT",
+		"call_type":                "TEXT",
 	}
 	rows, err := db.Query("PRAGMA table_info(transcriptions);")
 	if err != nil {
@@ -228,6 +291,20 @@ func initDB(db *sql.DB) error {
 				return err
 			}
 		}
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS app_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        default_model TEXT,
+        default_mode TEXT,
+        default_format TEXT,
+        auto_translate INTEGER DEFAULT 0,
+        webhook_endpoints TEXT,
+        preferred_language TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]');
+    `); err != nil {
+		return err
 	}
 	return nil
 }
@@ -270,7 +347,8 @@ func (s *server) handleNewFile(filename string) {
 	if err := s.sendGroupMe(text); err != nil {
 		log.Printf("groupme send failed: %v", err)
 	}
-	s.queueJob(filename, true, false)
+	opts, _ := s.defaultOptions()
+	s.queueJob(filename, true, false, opts)
 }
 
 func (s *server) runPretty(filename string) string {
@@ -289,12 +367,12 @@ func (s *server) runPretty(filename string) string {
 	return trimmed
 }
 
-func (s *server) queueJob(filename string, sendGroupMe bool, force bool) {
+func (s *server) queueJob(filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) {
 	if _, exists := s.running.LoadOrStore(filename, struct{}{}); exists && !force {
 		return
 	}
 	select {
-	case s.jobs <- job{filename: filename, sendGroupMe: sendGroupMe, force: force}:
+	case s.jobs <- job{filename: filename, sendGroupMe: sendGroupMe, force: force, options: opts}:
 	default:
 		log.Printf("job queue full, dropping job for %s", filename)
 		s.running.Delete(filename)
@@ -317,12 +395,16 @@ func (s *server) processFile(j job) error {
 	if err != nil {
 		return fmt.Errorf("stat source: %w", err)
 	}
-	if existing, err := s.getTranscription(filename); err == nil && !j.force {
-		if existing.Status == statusDone || existing.Status == statusProcessing {
-			return nil
+	var existingEntry *transcription
+	if existing, err := s.getTranscription(filename); err == nil {
+		existingEntry = existing
+		if !j.force {
+			if existing.Status == statusDone || existing.Status == statusProcessing {
+				return nil
+			}
 		}
 	}
-	if err := s.markProcessing(filename, sourcePath, info.Size()); err != nil {
+	if err := s.markProcessing(filename, sourcePath, info.Size(), j.options); err != nil {
 		return err
 	}
 	if err := waitForStableSize(sourcePath, info.Size(), 2*time.Second, 2); err != nil {
@@ -347,7 +429,7 @@ func (s *server) processFile(j job) error {
 			log.Printf("failed to mirror duplicate data: %v", err)
 		}
 		note := fmt.Sprintf("duplicate of %s", dup)
-		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup)
+		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil)
 		if j.sendGroupMe {
 			followup := fmt.Sprintf("%s transcript is duplicate of %s", filename, dup)
 			_ = s.sendGroupMe(followup)
@@ -361,19 +443,25 @@ func (s *server) processFile(j job) error {
 		return err
 	}
 
-	rawTranscript, cleanedTranscript, translation, embedding, err := s.multiPassTranscription(stagedPath)
+	rawTranscript, cleanedTranscript, translation, embedding, diarized, towns, normalized, actualModel, callType, err := s.multiPassTranscription(stagedPath, j.options)
 	if err != nil {
 		s.markError(filename, err)
 		return err
 	}
+	if callType == nil && existingEntry != nil && existingEntry.CallType != nil {
+		callType = existingEntry.CallType
+	}
 
-	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil); err != nil {
+	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType); err != nil {
 		return err
 	}
 	if len(embedding) > 0 {
 		if err := s.storeEmbedding(filename, embedding); err != nil {
 			log.Printf("store embedding: %v", err)
 		}
+	}
+	if err := s.fireWebhooks(filename); err != nil {
+		log.Printf("webhook error: %v", err)
 	}
 	if j.sendGroupMe {
 		followup := fmt.Sprintf("%s transcript:\n%s", filename, cleanedTranscript)
@@ -426,31 +514,49 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-func (s *server) multiPassTranscription(path string) (string, string, *string, []float64, error) {
-	raw, err := s.callOpenAIWithRetries(path)
+func (s *server) multiPassTranscription(path string, opts TranscriptionOptions) (string, string, *string, []float64, *string, *string, *string, *string, *string, error) {
+	raw, diarized, actualModel, err := s.callOpenAIWithRetries(path, opts)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, nil, nil, nil, nil, err
 	}
 	cleaned := raw
-	if c, err := s.enhanceTranscript(raw); err == nil && c != "" {
+	normalized := (*string)(nil)
+	towns := (*string)(nil)
+	if c, n, t, err := s.domainCleanup(raw); err == nil {
+		if c != "" {
+			cleaned = c
+		}
+		if n != "" {
+			normalized = &n
+		}
+		if len(t) > 0 {
+			data, _ := json.Marshal(t)
+			townsStr := string(data)
+			towns = &townsStr
+		}
+	}
+	if c, err := s.enhanceTranscript(cleaned); err == nil && c != "" {
 		cleaned = c
 	}
 
 	var translation *string
-	if t, err := s.translateTranscript(cleaned); err == nil && t != "" {
-		translation = &t
+	if opts.Mode == "translate" || opts.AutoTranslate {
+		if t, err := s.translateTranscript(cleaned); err == nil && t != "" {
+			translation = &t
+		}
 	}
 
 	emb, _ := s.embedTranscript(cleaned)
-	return raw, cleaned, translation, emb, nil
+	ct, _ := s.classifyCallType(cleaned)
+	return raw, cleaned, translation, emb, diarized, towns, normalized, actualModel, ct, nil
 }
 
-func (s *server) callOpenAIWithRetries(path string) (string, error) {
+func (s *server) callOpenAIWithRetries(path string, opts TranscriptionOptions) (string, *string, *string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		transcript, err := s.callOpenAI(path)
+		transcript, diarized, model, err := s.callOpenAI(path, opts)
 		if err == nil {
-			return transcript, nil
+			return transcript, diarized, model, nil
 		}
 		lastErr = err
 		time.Sleep(time.Duration(attempt+1) * time.Second)
@@ -459,28 +565,41 @@ func (s *server) callOpenAIWithRetries(path string) (string, error) {
 	// chunked fallback: split into ~15MB segments
 	chunks, err := chunkFile(path, 15*1024*1024)
 	if err != nil {
-		return "", lastErr
+		return "", nil, nil, lastErr
 	}
 	var combined []string
 	for _, chunk := range chunks {
-		t, err := s.callOpenAI(chunk)
+		t, _, model, err := s.callOpenAI(chunk, opts)
 		if err != nil {
-			return "", err
+			return "", nil, nil, err
 		}
 		combined = append(combined, t)
+		opts.Model = derefString(model, opts.Model)
 	}
-	return strings.Join(combined, " "), nil
+	finalModel := opts.Model
+	return strings.Join(combined, " "), nil, &finalModel, nil
 }
 
-func (s *server) callOpenAI(path string) (string, error) {
+func (s *server) callOpenAI(path string, opts TranscriptionOptions) (string, *string, *string, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		return "", errors.New("OPENAI_API_KEY not set")
+		return "", nil, nil, errors.New("OPENAI_API_KEY not set")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if info.Size() > 25*1024*1024 {
+		return "", nil, nil, fmt.Errorf("file exceeds 25MB limit")
+	}
+	if _, ok := allowedExtensions[strings.ToLower(filepath.Ext(path))]; !ok {
+		return "", nil, nil, fmt.Errorf("unsupported file type")
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", nil, nil, err
 	}
 	defer file.Close()
 
@@ -499,37 +618,73 @@ func (s *server) callOpenAI(path string) (string, error) {
 			_ = bodyWriter.CloseWithError(err)
 			return
 		}
-		writer.WriteField("model", "gpt-4o-transcribe")
+		writer.WriteField("model", opts.Model)
+		if opts.LanguageHint != "" {
+			writer.WriteField("language", opts.LanguageHint)
+		}
+		if opts.Prompt != "" {
+			writer.WriteField("prompt", opts.Prompt)
+		}
+		if opts.Format != "" {
+			writer.WriteField("response_format", opts.Format)
+		}
 	}()
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/transcriptions", bodyReader)
+	endpoint := "https://api.openai.com/v1/audio/transcriptions"
+	if opts.Mode == "translate" {
+		endpoint = "https://api.openai.com/v1/audio/translations"
+	}
+	req, err := http.NewRequest("POST", endpoint, bodyReader)
 	if err != nil {
-		return "", err
+		return "", nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("openai status %d: %s", resp.StatusCode, string(b))
+		return "", nil, nil, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(b))
 	}
 
-	var parsed struct {
-		Text string `json:"text"`
+	format := opts.Format
+	if format == "" {
+		format = "json"
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return "", err
+	switch format {
+	case "text":
+		b, _ := io.ReadAll(resp.Body)
+		txt := strings.TrimSpace(string(b))
+		if txt == "" {
+			return "", nil, nil, errors.New("empty transcript from openai")
+		}
+		return txt, nil, &opts.Model, nil
+	default:
+		var parsed map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+			return "", nil, nil, err
+		}
+		textVal, _ := parsed["text"].(string)
+		if textVal == "" {
+			return "", nil, nil, errors.New("empty transcript from openai")
+		}
+		var diarized *string
+		if opts.Model == "gpt-4o-transcribe-diarize" && opts.Format == "diarized_json" {
+			b, _ := json.Marshal(parsed)
+			jsonStr := string(b)
+			diarized = &jsonStr
+		}
+		modelUsed := opts.Model
+		if m, ok := parsed["model"].(string); ok && m != "" {
+			modelUsed = m
+		}
+		return textVal, diarized, &modelUsed, nil
 	}
-	if parsed.Text == "" {
-		return "", errors.New("empty transcript from openai")
-	}
-	return parsed.Text, nil
 }
 
 func (s *server) enhanceTranscript(raw string) (string, error) {
@@ -620,6 +775,113 @@ func (s *server) translateTranscript(text string) (string, error) {
 		return "", errors.New("empty translation")
 	}
 	return strings.TrimSpace(parsed.Choices[0].Message.Content), nil
+}
+
+func (s *server) domainCleanup(text string) (string, string, []string, error) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return text, "", nil, errors.New("OPENAI_API_KEY not set")
+	}
+	prompt := fmt.Sprintf("You are cleaning emergency radio transcripts for Sussex County, NJ. Normalize spelling, fix misheard Sussex County town names to the closest from this list: %s. Return JSON with fields normalized_transcript and recognized_towns (array). Maintain meaning.", strings.Join(sussexTowns, ", "))
+	payload := map[string]interface{}{
+		"model":           "gpt-4.1-mini",
+		"response_format": map[string]string{"type": "json_object"},
+		"messages": []map[string]string{
+			{"role": "system", "content": prompt},
+			{"role": "user", "content": text},
+		},
+	}
+	buf, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(buf))
+	if err != nil {
+		return text, "", nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return text, "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return text, "", nil, fmt.Errorf("cleanup status %d: %s", resp.StatusCode, string(b))
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return text, "", nil, err
+	}
+	if len(parsed.Choices) == 0 {
+		return text, "", nil, errors.New("empty cleanup")
+	}
+	content := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	var result struct {
+		NormalizedTranscript string   `json:"normalized_transcript"`
+		RecognizedTowns      []string `json:"recognized_towns"`
+	}
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return text, "", nil, err
+	}
+	cleaned := result.NormalizedTranscript
+	if cleaned == "" {
+		cleaned = text
+	}
+	return cleaned, cleaned, result.RecognizedTowns, nil
+}
+
+func (s *server) classifyCallType(text string) (*string, error) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return nil, errors.New("OPENAI_API_KEY not set")
+	}
+	prompt := "Classify the emergency call type into one of: Fire; EMS/Medical; Motor Vehicle Accident; Rescue; Hazmat; Alarm; Other / Unknown. Reply with only the label."
+	payload := map[string]interface{}{
+		"model": "gpt-4.1-mini",
+		"messages": []map[string]string{
+			{"role": "system", "content": prompt},
+			{"role": "user", "content": text},
+		},
+	}
+	buf, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("classification status %d: %s", resp.StatusCode, string(b))
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, err
+	}
+	if len(parsed.Choices) == 0 {
+		return nil, errors.New("empty classification")
+	}
+	label := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	if label == "" {
+		return nil, errors.New("missing call type")
+	}
+	return &label, nil
 }
 
 func (s *server) embedTranscript(text string) ([]float64, error) {
@@ -747,6 +1009,40 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.loadSettings()
+		if err != nil {
+			http.Error(w, "settings error", http.StatusInternalServerError)
+			return
+		}
+		respondJSON(w, settings)
+	case http.MethodPost:
+		var payload AppSettings
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if payload.DefaultModel == "" {
+			payload.DefaultModel = "gpt-4o-transcribe"
+		}
+		if payload.DefaultMode == "" {
+			payload.DefaultMode = "transcribe"
+		}
+		if payload.DefaultFormat == "" {
+			payload.DefaultFormat = "json"
+		}
+		if err := s.saveSettings(payload); err != nil {
+			http.Error(w, "save error", http.StatusInternalServerError)
+			return
+		}
+		respondJSON(w, map[string]string{"status": "ok"})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -781,7 +1077,8 @@ func (s *server) handleTranscriptionIndex(w http.ResponseWriter, r *http.Request
 			http.Error(w, "filename required", http.StatusBadRequest)
 			return
 		}
-		s.queueJob(filename, false, true)
+		opts, _ := s.defaultOptions()
+		s.queueJob(filename, false, true, opts)
 		respondJSON(w, map[string]string{"status": statusQueued, "filename": filename})
 		return
 	}
@@ -800,10 +1097,15 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	opts, err := s.parseOptionsFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	switch {
 	case len(parts) == 2 && parts[1] == "retranscribe" && r.Method == http.MethodPost:
-		s.queueJob(filename, false, true)
+		s.queueJob(filename, false, true, opts)
 		respondJSON(w, map[string]string{"status": statusQueued, "filename": filename})
 		return
 	case len(parts) == 2 && parts[1] == "similar" && r.Method == http.MethodGet:
@@ -846,6 +1148,14 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 				"raw_transcript_text":   existing.RawTranscript,
 				"clean_transcript_text": existing.CleanTranscript,
 				"translation_text":      existing.Translation,
+				"requested_model":       existing.RequestedModel,
+				"requested_mode":        existing.RequestedMode,
+				"requested_format":      existing.RequestedFormat,
+				"actual_model":          existing.ActualModel,
+				"diarized_json":         existing.DiarizedJSON,
+				"recognized_towns":      existing.RecognizedTowns,
+				"normalized_transcript": existing.NormalizedTranscript,
+				"call_type":             existing.CallType,
 				"size_bytes":            existing.SizeBytes,
 				"duration_seconds":      existing.DurationSeconds,
 				"hash":                  existing.Hash,
@@ -860,7 +1170,7 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		case statusError:
-			s.queueJob(cleaned, false, true)
+			s.queueJob(cleaned, false, true, opts)
 			respondJSON(w, map[string]interface{}{
 				"filename": existing.Filename,
 				"status":   statusQueued,
@@ -869,7 +1179,7 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.queueJob(cleaned, false, true)
+	s.queueJob(cleaned, false, true, opts)
 	respondJSON(w, map[string]interface{}{
 		"filename": cleaned,
 		"status":   statusQueued,
@@ -884,6 +1194,48 @@ func pickTranscript(t *transcription) *string {
 		return t.RawTranscript
 	}
 	return t.Transcript
+}
+
+func (s *server) parseOptionsFromRequest(r *http.Request) (TranscriptionOptions, error) {
+	defaults, _ := s.defaultOptions()
+	opts := defaults
+	q := r.URL.Query()
+	if v := q.Get("model"); v != "" {
+		if _, ok := allowedFormats[v]; !ok {
+			return opts, fmt.Errorf("unsupported model")
+		}
+		opts.Model = v
+	}
+	if v := q.Get("mode"); v != "" {
+		if v != "transcribe" && v != "translate" {
+			return opts, fmt.Errorf("unsupported mode")
+		}
+		opts.Mode = v
+	}
+	if v := q.Get("format"); v != "" {
+		opts.Format = v
+	}
+	if opts.Format == "" {
+		opts.Format = defaults.Format
+	}
+	allowed := allowedFormats[opts.Model]
+	ok := false
+	for _, f := range allowed {
+		if f == opts.Format {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return opts, fmt.Errorf("format not supported for model")
+	}
+	if v := q.Get("language"); v != "" {
+		opts.LanguageHint = v
+	}
+	if v := q.Get("prompt"); v != "" {
+		opts.Prompt = v
+	}
+	return opts, nil
 }
 
 func (s *server) handleTranscriptDownload(w http.ResponseWriter, r *http.Request, filename string) {
@@ -988,6 +1340,8 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("q"))
 	statusFilter := r.URL.Query().Get("status")
+	townFilter := strings.TrimSpace(r.URL.Query().Get("town"))
+	callTypeFilter := strings.TrimSpace(r.URL.Query().Get("call_type"))
 	sortBy := r.URL.Query().Get("sort")
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page < 1 {
@@ -999,17 +1353,25 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	offset := (page - 1) * pageSize
 
-	base := `SELECT id, filename, source_path, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, created_at, updated_at FROM transcriptions`
+	base := `SELECT id, filename, source_path, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions`
 	var where []string
 	var args []interface{}
 	if search != "" {
 		like := "%" + strings.ToLower(search) + "%"
-		where = append(where, "(lower(filename) LIKE ? OR lower(coalesce(clean_transcript_text, transcript_text, '')) LIKE ? OR lower(coalesce(raw_transcript_text, '')) LIKE ?)")
-		args = append(args, like, like, like)
+		where = append(where, "(lower(filename) LIKE ? OR lower(coalesce(clean_transcript_text, transcript_text, '')) LIKE ? OR lower(coalesce(raw_transcript_text, '')) LIKE ? OR lower(coalesce(normalized_transcript, '')) LIKE ?)")
+		args = append(args, like, like, like, like)
 	}
 	if statusFilter != "" {
 		where = append(where, "status = ?")
 		args = append(args, statusFilter)
+	}
+	if townFilter != "" {
+		where = append(where, "recognized_towns LIKE ?")
+		args = append(args, "%"+strings.ToLower(townFilter)+"%")
+	}
+	if callTypeFilter != "" {
+		where = append(where, "lower(coalesce(call_type,'')) = ?")
+		args = append(args, strings.ToLower(callTypeFilter))
 	}
 	if len(where) > 0 {
 		base += " WHERE " + strings.Join(where, " AND ")
@@ -1035,7 +1397,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	var result []transcription
 	for rows.Next() {
 		var t transcription
-		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
@@ -1049,22 +1411,50 @@ func respondJSON(w http.ResponseWriter, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func (s *server) loadSettings() (AppSettings, error) {
+	row := s.db.QueryRow(`SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language FROM app_settings WHERE id=1`)
+	var settings AppSettings
+	var auto int
+	var webhooks string
+	if err := row.Scan(&settings.DefaultModel, &settings.DefaultMode, &settings.DefaultFormat, &auto, &webhooks, &settings.PreferredLanguage); err != nil {
+		return settings, err
+	}
+	settings.AutoTranslate = auto == 1
+	if webhooks != "" {
+		_ = json.Unmarshal([]byte(webhooks), &settings.WebhookEndpoints)
+	}
+	if settings.WebhookEndpoints == nil {
+		settings.WebhookEndpoints = []string{}
+	}
+	return settings, nil
+}
+
+func (s *server) saveSettings(settings AppSettings) error {
+	hooks, _ := json.Marshal(settings.WebhookEndpoints)
+	auto := 0
+	if settings.AutoTranslate {
+		auto = 1
+	}
+	_, err := s.db.Exec(`UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage)
+	return err
+}
+
 func (s *server) getTranscription(filename string) (*transcription, error) {
-	row := s.db.QueryRow(`SELECT id, filename, source_path, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename)
+	row := s.db.QueryRow(`SELECT id, filename, source_path, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename)
 	var t transcription
-	if err := row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &t, nil
 }
 
-func (s *server) markProcessing(filename, sourcePath string, size int64) error {
-	_, err := s.db.Exec(`INSERT INTO transcriptions (filename, source_path, status, size_bytes) VALUES (?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=excluded.size_bytes`, filename, sourcePath, statusProcessing, size)
+func (s *server) markProcessing(filename, sourcePath string, size int64, opts TranscriptionOptions) error {
+	_, err := s.db.Exec(`INSERT INTO transcriptions (filename, source_path, status, size_bytes, requested_model, requested_mode, requested_format) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format`, filename, sourcePath, statusProcessing, size, opts.Model, opts.Mode, opts.Format)
 	return err
 }
 
-func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string) error {
-	_, err := s.db.Exec(`UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=? WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, filename)
+func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string, diarized *string, towns *string, normalized *string, actualModel *string, callType *string) error {
+	_, err := s.db.Exec(`UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=? WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, filename)
 	return err
 }
 
@@ -1080,6 +1470,13 @@ func nullableString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func derefString(s *string, fallback string) string {
+	if s != nil && *s != "" {
+		return *s
+	}
+	return fallback
 }
 
 func hashFile(path string) (string, error) {
@@ -1117,7 +1514,7 @@ func (s *server) copyFromDuplicate(filename, duplicate string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, filename)
+	_, err = s.db.Exec(`UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=? WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, filename)
 	return err
 }
 
@@ -1143,6 +1540,47 @@ func (s *server) storeEmbedding(filename string, embedding []float64) error {
 	}
 	_, err = s.db.Exec(`UPDATE transcriptions SET embedding=? WHERE filename=?`, string(data), filename)
 	return err
+}
+
+func (s *server) fireWebhooks(filename string) error {
+	settings, err := s.loadSettings()
+	if err != nil {
+		return err
+	}
+	if len(settings.WebhookEndpoints) == 0 {
+		return nil
+	}
+	t, err := s.getTranscription(filename)
+	if err != nil {
+		return err
+	}
+	payload := map[string]interface{}{
+		"filename":              t.Filename,
+		"transcript_text":       pickTranscript(t),
+		"raw_transcript_text":   t.RawTranscript,
+		"clean_transcript_text": t.CleanTranscript,
+		"translation_text":      t.Translation,
+		"recognized_towns":      t.RecognizedTowns,
+		"normalized_transcript": t.NormalizedTranscript,
+		"call_type":             t.CallType,
+		"requested_model":       t.RequestedModel,
+		"requested_mode":        t.RequestedMode,
+		"requested_format":      t.RequestedFormat,
+	}
+	buf, _ := json.Marshal(payload)
+	for _, endpoint := range settings.WebhookEndpoints {
+		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(buf))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := s.client.Do(req)
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+	}
+	return nil
 }
 
 func (s *server) loadEmbedding(filename string) ([]float64, error) {

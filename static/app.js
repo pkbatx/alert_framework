@@ -11,6 +11,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
   document.getElementById('search').addEventListener('input', debounce(loadList, 250));
   document.getElementById('status-filter').addEventListener('change', loadList);
+  document.getElementById('town-filter').addEventListener('input', debounce(loadList, 250));
+  document.getElementById('calltype-filter').addEventListener('change', loadList);
   document.getElementById('sort-by').addEventListener('change', loadList);
   document.getElementById('prev-page').addEventListener('click', () => changePage(-1));
   document.getElementById('next-page').addEventListener('click', () => changePage(1));
@@ -18,8 +20,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('download-json').addEventListener('click', () => download('json'));
   document.getElementById('download-srt').addEventListener('click', () => download('srt'));
   document.getElementById('retranscribe').addEventListener('click', retranscribe);
+  document.getElementById('transcribe-with-options').addEventListener('click', transcribeWithOptions);
+  document.getElementById('open-settings').addEventListener('click', showSettings);
+  document.getElementById('close-settings').addEventListener('click', hideSettings);
+  document.getElementById('settings-form').addEventListener('submit', saveSettings);
   setupTabs();
   loadList();
+  loadSettings();
 });
 
 function applyTheme() {
@@ -37,12 +44,16 @@ function toggleTheme() {
 async function loadList() {
   const q = document.getElementById('search').value.trim();
   const status = document.getElementById('status-filter').value;
+  const town = document.getElementById('town-filter').value.trim();
+  const callType = document.getElementById('calltype-filter').value;
   const sort = document.getElementById('sort-by').value;
   const url = new URL('/api/transcriptions', window.location.origin);
   url.searchParams.set('page', state.page);
   url.searchParams.set('page_size', state.pageSize);
   if (q) url.searchParams.set('q', q);
   if (status) url.searchParams.set('status', status);
+  if (town) url.searchParams.set('town', town);
+  if (callType) url.searchParams.set('call_type', callType);
   if (sort) url.searchParams.set('sort', sort === 'time' ? '' : sort);
   const res = await fetch(url);
   if (!res.ok) return;
@@ -85,10 +96,17 @@ async function selectItem(item) {
   if (data.hash) meta.push(`hash ${data.hash.slice(0,10)}`);
   if (data.duplicate_of) meta.push(`duplicate of ${data.duplicate_of}`);
   document.getElementById('detail-meta').textContent = meta.join(' • ');
+  const tags = [];
+  if (data.call_type) tags.push(`Call Type: ${data.call_type}`);
+  if (data.recognized_towns) tags.push(`Towns: ${data.recognized_towns}`);
+  if (data.requested_model) tags.push(`Model: ${data.requested_model}`);
+  if (data.requested_mode) tags.push(`Mode: ${data.requested_mode}`);
+  document.getElementById('detail-tags').textContent = tags.join(' • ');
   updateTranscript('clean');
   setActiveTab('clean');
   enableDownloads(true);
   document.getElementById('retranscribe').disabled = false;
+  document.getElementById('transcribe-with-options').disabled = false;
   const player = document.getElementById('player');
   player.src = `/${encodeURIComponent(item.filename)}`;
   renderSimilar(item.filename);
@@ -137,6 +155,19 @@ async function retranscribe() {
   if (!state.selected) return;
   await fetch(`/api/transcription/${encodeURIComponent(state.selected.filename)}/retranscribe`, { method: 'POST' });
   alert('Retranscription queued (no GroupMe alert will be sent).');
+}
+
+async function transcribeWithOptions() {
+  if (!state.selected) return;
+  const model = prompt('Model (whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe, gpt-4o-transcribe-diarize):', 'gpt-4o-transcribe');
+  const mode = prompt('Mode (transcribe/translate):', 'transcribe');
+  const format = prompt('Format:', 'json');
+  const url = new URL(`/api/transcription/${encodeURIComponent(state.selected.filename)}`, window.location.origin);
+  if (model) url.searchParams.set('model', model);
+  if (mode) url.searchParams.set('mode', mode);
+  if (format) url.searchParams.set('format', format);
+  await fetch(url);
+  alert('Transcription queued with options (no GroupMe alert).');
 }
 
 async function renderSimilar(filename) {
@@ -202,4 +233,37 @@ async function renderWave(ctx, audioEl) {
     ctx.stroke();
   }
   draw();
+}
+
+function showSettings() {
+  document.getElementById('settings-panel').classList.remove('hidden');
+}
+
+function hideSettings() {
+  document.getElementById('settings-panel').classList.add('hidden');
+}
+
+async function loadSettings() {
+  const res = await fetch('/api/settings');
+  if (!res.ok) return;
+  const data = await res.json();
+  document.getElementById('setting-model').value = data.DefaultModel || 'gpt-4o-transcribe';
+  document.getElementById('setting-mode').value = data.DefaultMode || 'transcribe';
+  document.getElementById('setting-format').value = data.DefaultFormat || 'json';
+  document.getElementById('setting-auto').checked = data.AutoTranslate;
+  document.getElementById('setting-webhooks').value = (data.WebhookEndpoints || []).join('\n');
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const payload = {
+    DefaultModel: document.getElementById('setting-model').value,
+    DefaultMode: document.getElementById('setting-mode').value,
+    DefaultFormat: document.getElementById('setting-format').value,
+    AutoTranslate: document.getElementById('setting-auto').checked,
+    WebhookEndpoints: document.getElementById('setting-webhooks').value.split('\n').map(s => s.trim()).filter(Boolean),
+  };
+  await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  alert('Settings saved');
+  hideSettings();
 }

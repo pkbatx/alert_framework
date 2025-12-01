@@ -22,12 +22,24 @@
           <option value="done">Done</option>
           <option value="error">Error</option>
         </select>
+        <input id="town-filter" type="search" placeholder="Filter by town" />
+        <select id="calltype-filter">
+          <option value="">All Call Types</option>
+          <option value="Fire">Fire</option>
+          <option value="EMS/Medical">EMS/Medical</option>
+          <option value="Motor Vehicle Accident">Motor Vehicle Accident</option>
+          <option value="Rescue">Rescue</option>
+          <option value="Hazmat">Hazmat</option>
+          <option value="Alarm">Alarm</option>
+          <option value="Other / Unknown">Other / Unknown</option>
+        </select>
         <select id="sort-by">
           <option value="time">Newest</option>
           <option value="size">Largest</option>
           <option value="status">Status</option>
         </select>
         <button id="theme-toggle" aria-label="Toggle theme">🌙</button>
+        <button id="open-settings" class="secondary">Settings</button>
       </div>
     </header>
 
@@ -51,12 +63,14 @@
           <div>
             <h2 id="detail-name">Select a call</h2>
             <p class="muted" id="detail-meta"></p>
+            <p class="muted" id="detail-tags"></p>
           </div>
           <div class="detail-actions">
             <button id="download-txt" disabled>Download TXT</button>
             <button id="download-json" disabled>Download JSON</button>
             <button id="download-srt" disabled>Download SRT</button>
             <button id="retranscribe" class="secondary" disabled>Retranscribe (no alert)</button>
+            <button id="transcribe-with-options" class="secondary" disabled>Transcribe with options</button>
           </div>
         </div>
         <div class="media">
@@ -76,6 +90,41 @@
         <div class="similar" id="similar"></div>
       </section>
     </main>
+    <section id="settings-panel" class="panel hidden">
+      <h3>Defaults & Webhooks</h3>
+      <form id="settings-form">
+        <label>Default Model
+          <select name="default_model" id="setting-model">
+            <option value="whisper-1">whisper-1</option>
+            <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe</option>
+            <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
+            <option value="gpt-4o-transcribe-diarize">gpt-4o-transcribe-diarize</option>
+          </select>
+        </label>
+        <label>Default Mode
+          <select name="default_mode" id="setting-mode">
+            <option value="transcribe">Transcribe</option>
+            <option value="translate">Translate</option>
+          </select>
+        </label>
+        <label>Default Format
+          <select name="default_format" id="setting-format">
+            <option value="json">json</option>
+            <option value="text">text</option>
+            <option value="srt">srt</option>
+            <option value="vtt">vtt</option>
+            <option value="verbose_json">verbose_json</option>
+            <option value="diarized_json">diarized_json</option>
+          </select>
+        </label>
+        <label><input type="checkbox" name="auto_translate" id="setting-auto" /> Auto-translate non-English</label>
+        <label>Webhook endpoints (one per line)
+          <textarea id="setting-webhooks" rows="3"></textarea>
+        </label>
+        <button type="submit">Save</button>
+        <button type="button" id="close-settings">Close</button>
+      </form>
+    </section>
   </div>
   <script src="/static/app.js"></script>
 </body>

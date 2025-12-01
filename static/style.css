@@ -114,6 +114,9 @@ pre { white-space: pre-wrap; margin: 0; font-family: "JetBrains Mono", monospace
 .similar { border-top: 1px solid var(--border); padding-top: 8px; }
 .similar h3 { margin-top: 0; }
 
+.panel { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel); }
+.hidden { display: none; }
+
 @media (max-width: 900px) {
   main { grid-template-columns: 1fr; }
   header { flex-direction: column; align-items: flex-start; }
