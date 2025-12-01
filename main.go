@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"math"
@@ -1525,8 +1526,10 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing UI", http.StatusInternalServerError)
 			return
 		}
+		page := strings.ReplaceAll(string(data), "__DEV_MODE__", fmt.Sprintf("%v", s.cfg.DevUI))
+		page = strings.ReplaceAll(page, "__DEFAULT_CLEANUP__", template.HTMLEscapeString(defaultCleanupPrompt))
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(page))
 	case strings.HasPrefix(r.URL.Path, "/static/"):
 		http.FileServer(http.FS(embeddedStatic)).ServeHTTP(w, r)
 	default:

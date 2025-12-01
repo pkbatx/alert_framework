@@ -104,6 +104,7 @@ button.ghost { background: transparent; border-color: var(--border); }
   display: grid;
   grid-template-columns: 1.2fr 0.9fr;
   gap: 14px;
+  align-items: start;
 }
 
 .panel {
@@ -137,7 +138,7 @@ button.ghost { background: transparent; border-color: var(--border); }
 .badge-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .tag-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
 
-.badge {
+.badge { 
   display: inline-flex;
   align-items: center;
   padding: 6px 10px;
@@ -148,6 +149,7 @@ button.ghost { background: transparent; border-color: var(--border); }
   border: 1px solid transparent;
 }
 .badge.tag { background: rgba(91, 208, 255, 0.1); color: var(--text); border-color: rgba(91, 208, 255, 0.25); }
+.badge.tag:hover { border-color: var(--accent); }
 .badge.status-done { background: rgba(74, 222, 128, 0.15); color: var(--success); border-color: rgba(74, 222, 128, 0.35); }
 .badge.status-processing { background: rgba(251, 191, 36, 0.12); color: var(--warning); border-color: rgba(251, 191, 36, 0.32); }
 .badge.status-queued { background: rgba(91, 208, 255, 0.12); color: var(--accent); border-color: rgba(91, 208, 255, 0.3); }
@@ -172,6 +174,21 @@ button.ghost { background: transparent; border-color: var(--border); }
 .backfill-grid dt { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
 .backfill-grid dd { margin: 0; font-weight: 700; }
 .backfill-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+
+.active-filter-row { display: flex; gap: 8px; align-items: center; min-height: 24px; margin: 6px 0 12px; }
+.active-filter-row .badge { cursor: pointer; }
+.active-filter-row .muted { font-size: 13px; }
+
+.viz-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin: 12px 0; }
+.viz { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+.viz-header { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 13px; }
+.viz-bar { background: rgba(146, 160, 182, 0.14); border-radius: 999px; height: 10px; overflow: hidden; margin-top: 8px; }
+.viz-bar span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent-strong), var(--accent)); transition: width 0.2s ease; }
+
+.settings-actions { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.settings-actions button { flex: 1; min-width: 180px; }
+
+.stack { display: grid; gap: 12px; align-content: start; }
 
 .settings-grid { display: grid; gap: 10px; }
 .settings-grid select, .settings-grid textarea, .settings-grid input[type="checkbox"] { width: 100%; }
