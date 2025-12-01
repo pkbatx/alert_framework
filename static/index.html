@@ -51,66 +51,7 @@
           <option value="backfill">Backfill</option>
         </select>
       </div>
-      <div class="field">
-        <label for="date-filter">Date range</label>
-        <select id="date-filter">
-          <option value="24h">Last 24h</option>
-          <option value="today">Today</option>
-          <option value="7d">Last 7d</option>
-          <option value="all">All time</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="type-filter">Call type</label>
-        <select id="type-filter" multiple aria-label="Filter by call type">
-          <option value="EMS">EMS</option>
-          <option value="FIRE">Fire</option>
-          <option value="POLICE">Police</option>
-          <option value="VOL">Volunteer</option>
-          <option value="OTHER">Other</option>
-        </select>
-        <small class="muted">Use Cmd/Ctrl + click to select multiple.</small>
-      </div>
-      <div class="field">
-        <label for="tag-filter">Tags</label>
-        <select id="tag-filter" multiple aria-label="Filter by tag">
-          <option value="backfill">backfill</option>
-          <option value="done">done</option>
-          <option value="failed">failed</option>
-          <option value="needs review">needs review</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="duration-filter">Duration</label>
-        <select id="duration-filter">
-          <option value="">Any length</option>
-          <option value="short">Under 1 min</option>
-          <option value="medium">1–5 min</option>
-          <option value="long">Over 5 min</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="sort-order">Sort</label>
-        <select id="sort-order">
-          <option value="time-desc">Timestamp (newest)</option>
-          <option value="time-asc">Timestamp (oldest)</option>
-          <option value="duration">Duration</option>
-          <option value="status">Status</option>
-          <option value="source">Source</option>
-        </select>
-      </div>
-      <div class="field compact">
-        <label for="page-size">Page size</label>
-        <select id="page-size">
-          <option value="25">25</option>
-          <option value="50">50</option>
-          <option value="100">100</option>
-        </select>
-      </div>
-      <div class="control-actions">
-        <button id="refresh-btn" class="ghost">Refresh</button>
-        <button id="export-btn" class="primary">Export</button>
-      </div>
+      <button id="refresh-btn" class="primary">Refresh</button>
     </section>
 
     <div class="active-filter-row" aria-live="polite">
@@ -130,11 +71,6 @@
         <div id="list" class="call-list" role="list"></div>
         <div id="empty-state" class="empty hidden">No calls processed yet. New calls will appear here automatically.</div>
         <div id="list-error" class="error hidden" role="alert">Unable to load calls. Please try again.</div>
-        <div id="pagination" class="pagination hidden" role="navigation" aria-label="Pagination">
-          <button id="prev-page" class="ghost">Previous</button>
-          <span id="page-indicator" class="muted"></span>
-          <button id="next-page" class="ghost">Next</button>
-        </div>
       </section>
 
       <section class="stack">
@@ -144,52 +80,47 @@
               <p class="eyebrow">Health</p>
               <h2>System Status</h2>
             </div>
-            <div class="header-actions">
-              <button id="retry-status" class="ghost">Reload</button>
-              <button class="ghost toggle-panel" data-target="status-body" aria-expanded="false">Expand</button>
+            <button id="retry-status" class="ghost">Reload</button>
+          </div>
+          <div id="status-grid" class="status-grid">
+            <div class="stat"><span class="label">Queue length</span><strong id="stat-queue"></strong></div>
+            <div class="stat"><span class="label">Capacity</span><strong id="stat-capacity"></strong></div>
+            <div class="stat"><span class="label">Workers</span><strong id="stat-workers"></strong></div>
+            <div class="stat"><span class="label">Processed</span><strong id="stat-processed"></strong></div>
+            <div class="stat"><span class="label">Failed</span><strong id="stat-failed"></strong></div>
+          </div>
+          <div class="viz-grid">
+            <div class="viz">
+              <div class="viz-header">
+                <span>Queue fill</span>
+                <strong id="viz-queue-label">--</strong>
+              </div>
+              <div class="viz-bar"><span id="viz-queue"></span></div>
+            </div>
+            <div class="viz">
+              <div class="viz-header">
+                <span>Success ratio</span>
+                <strong id="viz-success-label">--</strong>
+              </div>
+              <div class="viz-bar"><span id="viz-success"></span></div>
             </div>
           </div>
-          <div id="status-body" class="panel-body collapsed">
-            <div id="status-grid" class="status-grid">
-              <div class="stat"><span class="label">Queue length</span><strong id="stat-queue"></strong></div>
-              <div class="stat"><span class="label">Capacity</span><strong id="stat-capacity"></strong></div>
-              <div class="stat"><span class="label">Workers</span><strong id="stat-workers"></strong></div>
-              <div class="stat"><span class="label">Processed</span><strong id="stat-processed"></strong></div>
-              <div class="stat"><span class="label">Failed</span><strong id="stat-failed"></strong></div>
+          <div class="backfill">
+            <div class="panel-subheader">
+              <h3>Last Backfill</h3>
+              <p class="muted" id="backfill-caption">No runs yet.</p>
             </div>
-            <div class="viz-grid">
-              <div class="viz">
-                <div class="viz-header">
-                  <span>Queue fill</span>
-                  <strong id="viz-queue-label">--</strong>
-                </div>
-                <div class="viz-bar"><span id="viz-queue"></span></div>
-              </div>
-              <div class="viz">
-                <div class="viz-header">
-                  <span>Success ratio</span>
-                  <strong id="viz-success-label">--</strong>
-                </div>
-                <div class="viz-bar"><span id="viz-success"></span></div>
-              </div>
-            </div>
-            <div class="backfill">
-              <div class="panel-subheader">
-                <h3>Last Backfill</h3>
-                <p class="muted" id="backfill-caption">No runs yet.</p>
-              </div>
-              <dl class="backfill-grid">
-                <div><dt>Selected</dt><dd id="bf-selected">--</dd></div>
-                <div><dt>Enqueued</dt><dd id="bf-enqueued">--</dd></div>
-                <div><dt>Dropped (full)</dt><dd id="bf-dropped">--</dd></div>
-                <div><dt>Other errors</dt><dd id="bf-errors">--</dd></div>
-                <div><dt>Already processed</dt><dd id="bf-processed">--</dd></div>
-                <div><dt>Unprocessed</dt><dd id="bf-unprocessed">--</dd></div>
-              </dl>
-              <div class="backfill-actions admin-only">
-                <button id="trigger-backfill" class="primary">Run backfill</button>
-                <small class="muted" id="backfill-hint">Runs up to the configured backfill limit.</small>
-              </div>
+            <dl class="backfill-grid">
+              <div><dt>Selected</dt><dd id="bf-selected">--</dd></div>
+              <div><dt>Enqueued</dt><dd id="bf-enqueued">--</dd></div>
+              <div><dt>Dropped (full)</dt><dd id="bf-dropped">--</dd></div>
+              <div><dt>Other errors</dt><dd id="bf-errors">--</dd></div>
+              <div><dt>Already processed</dt><dd id="bf-processed">--</dd></div>
+              <div><dt>Unprocessed</dt><dd id="bf-unprocessed">--</dd></div>
+            </dl>
+            <div class="backfill-actions admin-only">
+              <button id="trigger-backfill" class="primary">Run backfill</button>
+              <small class="muted" id="backfill-hint">Runs up to the configured backfill limit.</small>
             </div>
           </div>
         </div>
@@ -205,52 +136,13 @@
           <div id="detail-content" class="detail-content">
             <div class="badge-row" id="detail-badges"></div>
             <p class="muted" id="detail-location"></p>
-            <div class="audio-player" id="audio-player" role="group" aria-label="Audio player">
-              <div id="player-status" class="muted">Player idle</div>
-              <div id="waveform" class="waveform" aria-live="polite"></div>
-              <div class="player-controls">
-                <div class="control-row">
-                  <button id="play-btn" class="primary" aria-label="Play">Play</button>
-                  <span id="time-display" class="muted" aria-live="polite">00:00 / 00:00</span>
-                </div>
-                <div class="control-row">
-                  <label for="volume-slider">Volume</label>
-                  <input id="volume-slider" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume" />
-                  <label for="speed-select">Speed</label>
-                  <select id="speed-select" aria-label="Playback speed">
-                    <option value="0.75">0.75x</option>
-                    <option value="1" selected>1x</option>
-                    <option value="1.25">1.25x</option>
-                    <option value="1.5">1.5x</option>
-                  </select>
-                </div>
-              </div>
-              <div id="audio-fallback" class="audio-fallback hidden" role="alert">
-                Player unavailable. Use the download link below.
-              </div>
-            </div>
             <a id="detail-audio" class="audio-link hidden" target="_blank" rel="noopener">Open audio file</a>
-            <div class="transcript-panel">
-              <div class="panel-subheader">
-                <div>
-                  <h3>Transcript</h3>
-                  <p class="muted">Click a line to jump playback.</p>
-                </div>
-                <div class="transcript-actions">
-                  <button id="copy-transcript" class="ghost" aria-label="Copy transcript">Copy transcript</button>
-                  <button id="download-transcript" class="ghost" aria-label="Download transcript">Download .txt</button>
-                  <button id="mark-reviewed" class="ghost" aria-pressed="false">Mark reviewed</button>
-                </div>
-              </div>
-              <div class="transcript-tabs" aria-label="Transcript view">
-                <button data-tab="clean" class="active">Cleaned</button>
-                <button data-tab="raw">Raw</button>
-                <button data-tab="translation">Translation</button>
-              </div>
-              <div id="transcript-empty" class="empty hidden">Transcript not available yet.</div>
-              <div id="transcript-list" class="transcript-list" role="list" aria-label="Interactive transcript"></div>
-              <pre id="transcript-text" class="transcript-body">No call selected.</pre>
+            <div class="transcript-tabs" aria-label="Transcript view">
+              <button data-tab="clean" class="active">Cleaned</button>
+              <button data-tab="raw">Raw</button>
+              <button data-tab="translation">Translation</button>
             </div>
+            <pre id="transcript-text" class="transcript-body">No call selected.</pre>
           </div>
         </div>
 
@@ -260,53 +152,50 @@
               <p class="eyebrow">Defaults</p>
               <h2>Processing Settings</h2>
             </div>
-            <button class="ghost toggle-panel" data-target="settings-body" aria-expanded="false">Expand</button>
           </div>
-          <div id="settings-body" class="panel-body collapsed">
-            <form id="settings-form" class="settings-grid admin-only">
-              <label>Default model
-                <select id="setting-model">
-                  <option value="whisper-1">whisper-1</option>
-                  <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe</option>
-                  <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
-                  <option value="gpt-4o-transcribe-diarize">gpt-4o-transcribe-diarize</option>
-                </select>
-              </label>
-              <label>Mode
-                <select id="setting-mode">
-                  <option value="transcribe">Transcribe</option>
-                  <option value="translate">Translate</option>
-                </select>
-              </label>
-              <label>Format
-                <select id="setting-format">
-                  <option value="json">json</option>
-                  <option value="text">text</option>
-                  <option value="srt">srt</option>
-                  <option value="vtt">vtt</option>
-                  <option value="verbose_json">verbose_json</option>
-                  <option value="diarized_json">diarized_json</option>
-                </select>
-              </label>
-              <label class="checkbox">
-                <input type="checkbox" id="setting-auto" /> Auto-translate non-English
-              </label>
-              <label>Webhook endpoints
-                <textarea id="setting-webhooks" rows="2" placeholder="One URL per line"></textarea>
-              </label>
-              <label>Cleanup prompt
-                <textarea id="setting-cleanup" rows="3" placeholder="Default cleanup prompt will be used if left blank."></textarea>
-              </label>
-              <div class="settings-actions">
-                <button type="button" id="reset-cleanup" class="ghost">Use default cleanup prompt</button>
-                <button type="submit" class="primary">Save settings</button>
-              </div>
-            </form>
-          </div>
+          <form id="settings-form" class="settings-grid admin-only">
+            <label>Default model
+              <select id="setting-model">
+                <option value="whisper-1">whisper-1</option>
+                <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe</option>
+                <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
+                <option value="gpt-4o-transcribe-diarize">gpt-4o-transcribe-diarize</option>
+              </select>
+            </label>
+            <label>Mode
+              <select id="setting-mode">
+                <option value="transcribe">Transcribe</option>
+                <option value="translate">Translate</option>
+              </select>
+            </label>
+            <label>Format
+              <select id="setting-format">
+                <option value="json">json</option>
+                <option value="text">text</option>
+                <option value="srt">srt</option>
+                <option value="vtt">vtt</option>
+                <option value="verbose_json">verbose_json</option>
+                <option value="diarized_json">diarized_json</option>
+              </select>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="setting-auto" /> Auto-translate non-English
+            </label>
+            <label>Webhook endpoints
+              <textarea id="setting-webhooks" rows="2" placeholder="One URL per line"></textarea>
+            </label>
+            <label>Cleanup prompt
+              <textarea id="setting-cleanup" rows="3" placeholder="Default cleanup prompt will be used if left blank."></textarea>
+            </label>
+            <div class="settings-actions">
+              <button type="button" id="reset-cleanup" class="ghost">Use default cleanup prompt</button>
+              <button type="submit" class="primary">Save settings</button>
+            </div>
+          </form>
         </div>
       </section>
     </main>
   </div>
-  <script type="module" src="/static/app.js"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>
