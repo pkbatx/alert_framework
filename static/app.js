@@ -1,362 +1,254 @@
-const state = {
-  items: [],
-  filtered: [],
-  selected: null,
-  activeTab: 'clean',
-  tagFilter: null,
-};
+(() => {
+  const listEl = document.getElementById('call-list');
+  const emptyState = document.getElementById('empty-state');
+  const totalCount = document.getElementById('total-count');
+  const searchInput = document.getElementById('search');
+  const statusSelect = document.getElementById('status');
+  const refreshBtn = document.getElementById('refresh');
+  const windowButtons = document.querySelectorAll('.window-switcher button');
+  const regenBtn = document.getElementById('regen');
+  const playBtn = document.getElementById('play');
+  const downloadLink = document.getElementById('download');
+  const waveformEl = document.getElementById('waveform');
+  const transcriptEl = document.getElementById('transcript-text');
+  const highlightToggle = document.getElementById('highlight-toggle');
+  const detailTitle = document.getElementById('detail-title');
+  const detailMeta = document.getElementById('detail-meta');
+  const detailStatus = document.getElementById('detail-status');
+  const detailType = document.getElementById('detail-type');
+  const detailAgency = document.getElementById('detail-agency');
+  const detailTags = document.getElementById('detail-tags');
+  const updatedAtEl = document.getElementById('updated-at');
+  const tagFilterEl = document.getElementById('tag-filter');
 
-const flags = {
-  devMode: document.body.dataset.devMode === 'true',
-  defaultCleanup: document.body.dataset.defaultCleanup || '',
-};
-
-const formatTime = (value) => {
-  if (!value) return '';
-  const d = new Date(value);
-  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-};
-
-const debounce = (fn, wait = 250) => {
-  let t;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), wait);
+  const state = {
+    window: '24h',
+    search: '',
+    status: '',
+    tagFilter: [],
+    calls: [],
+    stats: null,
+    selected: null,
+    wavesurfer: null,
   };
-};
 
-const renderTags = (tags = []) => {
-  if (!tags.length) return '';
-  return `<div class="tag-row">${tags.map((t) => `<button class="badge tag" data-tag="${t}" type="button">${t}</button>`).join('')}</div>`;
-};
-
-const buildLocationLine = (item) => {
-  const pieces = [item.town, item.agency].filter(Boolean);
-  return pieces.join(' • ');
-};
-
-window.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('search').addEventListener('input', debounce(loadList, 200));
-  document.getElementById('status-filter').addEventListener('change', loadList);
-  document.getElementById('source-filter').addEventListener('change', renderList);
-  document.getElementById('refresh-btn').addEventListener('click', () => { loadList(); loadStatus(); });
-  document.getElementById('retry-status').addEventListener('click', loadStatus);
-  document.getElementById('settings-form').addEventListener('submit', saveSettings);
-  document.getElementById('reset-cleanup').addEventListener('click', resetCleanupPrompt);
-  document.getElementById('trigger-backfill').addEventListener('click', runBackfill);
-  setupTabs();
-  setupAdminVisibility();
-  renderTagFilterPill();
-  loadList();
-  loadStatus();
-  loadSettings();
-});
-
-async function loadList() {
-  const search = document.getElementById('search').value.trim();
-  const status = document.getElementById('status-filter').value;
-  const url = new URL('/api/transcriptions', window.location.origin);
-  if (search) url.searchParams.set('q', search);
-  if (status) url.searchParams.set('status', status);
-  url.searchParams.set('sort', 'time');
-  url.searchParams.set('page', '1');
-  url.searchParams.set('page_size', '100');
-  toggleError(false);
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('request failed');
-    state.items = await res.json();
-    renderList();
-  } catch (e) {
-    toggleError(true);
+  function setWindow(next) {
+    state.window = next;
+    windowButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.window === next));
+    fetchCalls();
   }
-}
 
-function renderList() {
-  const listEl = document.getElementById('list');
-  listEl.innerHTML = '';
-  const sourceFilter = document.getElementById('source-filter').value;
-  state.filtered = state.items.filter((item) => {
-    if (sourceFilter && item.source !== sourceFilter) return false;
-    if (state.tagFilter) {
-      const tags = Array.isArray(item.tags) ? item.tags : [];
-      if (!tags.includes(state.tagFilter)) return false;
+  function formatDate(value) {
+    if (!value) return '—';
+    const dt = new Date(value);
+    return dt.toLocaleString();
+  }
+
+  function renderTags(container, tags, clickable = false) {
+    container.innerHTML = '';
+    tags.forEach((tag) => {
+      const pill = document.createElement('span');
+      pill.className = 'tag';
+      pill.textContent = tag;
+      if (clickable) {
+        const active = state.tagFilter.includes(tag.toLowerCase());
+        pill.classList.toggle('active', active);
+        pill.addEventListener('click', () => toggleTag(tag));
+      }
+      container.appendChild(pill);
+    });
+  }
+
+  function toggleTag(tag) {
+    const normalized = tag.toLowerCase();
+    if (state.tagFilter.includes(normalized)) {
+      state.tagFilter = state.tagFilter.filter((t) => t !== normalized);
+    } else {
+      state.tagFilter.push(normalized);
     }
-    return true;
-  });
-
-  if (!state.filtered.length) {
-    document.getElementById('empty-state').classList.remove('hidden');
-    return;
+    fetchCalls();
   }
-  document.getElementById('empty-state').classList.add('hidden');
 
-  state.filtered.forEach((item) => {
-    const card = document.createElement('div');
+  function buildCard(call) {
+    const card = document.createElement('article');
     card.className = 'call-card';
-    card.role = 'listitem';
-    const snippet = buildSnippet(item);
-    const title = item.pretty_title || item.filename;
-    const location = buildLocationLine(item);
+    card.tabIndex = 0;
+    card.setAttribute('role', 'listitem');
     card.innerHTML = `
-      <div class="card-header">
-        <div>
-          <div class="filename">${title}</div>
-          ${location ? `<p class="muted tight">${location}</p>` : ''}
-          ${renderTags(item.tags)}
-        </div>
-        <div class="badge-row">
-          ${renderStatusBadge(item.status)}
-          ${renderSourceBadge(item.source)}
-        </div>
-      </div>
-      <p class="snippet">${snippet}</p>
+      <div class="title">${call.pretty_title || call.filename}</div>
       <div class="meta">
-        <span>${formatTime(item.updated_at)}</span>
-        ${item.call_type ? `<span>${item.call_type}</span>` : ''}
+        <span>${formatDate(call.call_timestamp)}</span>
+        <span class="badge ${call.status}">${call.status}</span>
       </div>
     `;
-    card.addEventListener('click', () => selectItem(item));
-    card.querySelectorAll('.badge.tag').forEach((tagBtn) => {
-      tagBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleTagFilter(tagBtn.dataset.tag);
-      });
+    card.addEventListener('click', () => selectCall(call));
+    card.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Enter' || evt.key === ' ') {
+        evt.preventDefault();
+        selectCall(call);
+      }
     });
-    listEl.appendChild(card);
-  });
-}
-
-function buildSnippet(item) {
-  const text = item.clean_transcript_text || item.transcript_text || item.raw_transcript_text;
-  if (!text) return 'Transcript not available yet.';
-  const trimmed = text.replace(/\s+/g, ' ').trim();
-  return trimmed.length > 140 ? `${trimmed.slice(0, 140)}…` : trimmed;
-}
-
-function renderStatusBadge(status) {
-  const cls = `badge status-${status || 'queued'}`;
-  const label = status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Queued';
-  return `<span class="${cls}">${label}</span>`;
-}
-
-function renderSourceBadge(source) {
-  if (!source) return '';
-  return `<span class="badge source-${source}">${source}</span>`;
-}
-
-async function selectItem(item) {
-  try {
-    const res = await fetch(`/api/transcription/${encodeURIComponent(item.filename)}`);
-    if (!res.ok) throw new Error('failed');
-    const data = await res.json();
-    state.selected = data;
-    document.getElementById('detail-title').textContent = data.pretty_title || data.filename;
-    const metaParts = [];
-    if (data.duration_seconds) metaParts.push(`${data.duration_seconds.toFixed(1)}s`);
-    if (data.size_bytes) metaParts.push(`${(data.size_bytes / 1024 / 1024).toFixed(2)} MB`);
-    metaParts.push(formatTime(data.updated_at));
-    document.getElementById('detail-meta').textContent = metaParts.filter(Boolean).join(' • ');
-    const location = buildLocationLine(data);
-    document.getElementById('detail-location').textContent = location || data.filename;
-    const audioLink = document.getElementById('detail-audio');
-    if (data.audio_url) {
-      audioLink.href = data.audio_url;
-      audioLink.classList.remove('hidden');
-    } else {
-      audioLink.classList.add('hidden');
+    if (state.selected && state.selected.filename === call.filename) {
+      card.classList.add('active');
     }
-    renderBadges(data);
-    updateTranscript(state.activeTab);
-  } catch (e) {
-    document.getElementById('detail-meta').textContent = 'Unable to load transcription details.';
+    return card;
   }
-}
 
-function renderBadges(data) {
-  const wrap = document.getElementById('detail-badges');
-  wrap.innerHTML = '';
-  wrap.insertAdjacentHTML('beforeend', renderStatusBadge(data.status));
-  wrap.insertAdjacentHTML('beforeend', renderSourceBadge(data.source));
-  if (data.call_type) wrap.insertAdjacentHTML('beforeend', `<span class="badge">${data.call_type}</span>`);
-  const recognized = Array.isArray(data.recognized_towns)
-    ? data.recognized_towns
-    : data.recognized_towns
-      ? [data.recognized_towns]
-      : [];
-  const tags = Array.isArray(data.tags) ? data.tags : recognized;
-  const tagHtml = renderTags(tags);
-  if (tagHtml) {
-    wrap.insertAdjacentHTML('beforeend', tagHtml);
+  function renderList() {
+    listEl.innerHTML = '';
+    if (!state.calls.length) {
+      emptyState.classList.remove('hidden');
+      totalCount.textContent = '';
+      return;
+    }
+    emptyState.classList.add('hidden');
+    state.calls.forEach((call) => listEl.appendChild(buildCard(call)));
+    totalCount.textContent = `${state.calls.length} calls`;
   }
-}
 
-function setupTabs() {
-  document.querySelectorAll('.transcript-tabs button').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      state.activeTab = btn.dataset.tab;
-      setActiveTab(btn.dataset.tab);
-      updateTranscript(btn.dataset.tab);
+  function createWave(url) {
+    if (state.wavesurfer) {
+      state.wavesurfer.destroy();
+      state.wavesurfer = null;
+    }
+    state.wavesurfer = WaveSurfer.create({
+      container: waveformEl,
+      waveColor: '#7ce7ff',
+      progressColor: '#5ef5a4',
+      height: 80,
+      cursorWidth: 1,
     });
-  });
-}
-
-function setActiveTab(tab) {
-  document.querySelectorAll('.transcript-tabs button').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.tab === tab);
-  });
-}
-
-function updateTranscript(tab) {
-  const pre = document.getElementById('transcript-text');
-  const data = state.selected;
-  if (!data) {
-    pre.textContent = 'No call selected.';
-    return;
+    state.wavesurfer.load(url);
+    state.wavesurfer.on('ready', () => playBtn.removeAttribute('disabled'));
+    state.wavesurfer.on('error', (e) => console.error('WaveSurfer error', e));
+    state.wavesurfer.on('play', () => transcriptEl.classList.toggle('playing', highlightToggle.checked));
+    state.wavesurfer.on('pause', () => transcriptEl.classList.remove('playing'));
   }
-  let text = '';
-  if (tab === 'raw') text = data.raw_transcript_text || data.transcript_text || '';
-  else if (tab === 'translation') text = data.translation_text || 'No translation available yet.';
-  else text = data.clean_transcript_text || data.transcript_text || '';
-  pre.textContent = text || `Status: ${data.status}`;
-}
 
-function toggleError(show) {
-  document.getElementById('list-error').classList.toggle('hidden', !show);
-  document.getElementById('list').classList.toggle('hidden', show);
-  document.getElementById('empty-state').classList.toggle('hidden', show);
-}
-
-async function loadStatus() {
-  try {
-    const res = await fetch('/debug/queue');
-    if (!res.ok) throw new Error('status failed');
-    const data = await res.json();
-    document.getElementById('queue-level').textContent = data.length ?? '--';
-    document.getElementById('queue-capacity').textContent = `of ${data.capacity ?? '--'}`;
-    document.getElementById('worker-count').textContent = data.workers ?? '--';
-    document.getElementById('stat-queue').textContent = `${data.length ?? 0}`;
-    document.getElementById('stat-capacity').textContent = data.capacity ?? '--';
-    document.getElementById('stat-workers').textContent = data.workers ?? '--';
-    document.getElementById('stat-processed').textContent = data.processed_jobs ?? '--';
-    document.getElementById('stat-failed').textContent = data.failed_jobs ?? '--';
-    renderViz(data);
-    renderBackfill(data.has_backfill ? data.last_backfill : null, data.backfill_running);
-  } catch (e) {
-    document.getElementById('backfill-caption').textContent = 'Unable to load status right now.';
-  }
-}
-
-function renderViz(data) {
-  const capacity = Number(data.capacity) || 0;
-  const length = Number(data.length) || 0;
-  const processed = Number(data.processed_jobs) || 0;
-  const failed = Number(data.failed_jobs) || 0;
-  const queuePct = capacity > 0 ? Math.min(100, Math.round((length / capacity) * 100)) : 0;
-  const successDenom = processed + failed;
-  const successPct = successDenom > 0 ? Math.round(((processed - failed) / successDenom) * 100) : 0;
-
-  document.getElementById('viz-queue-label').textContent = capacity ? `${queuePct}% full` : '--';
-  document.getElementById('viz-success-label').textContent = successDenom ? `${successPct}% success` : '--';
-  document.getElementById('viz-queue').style.width = `${queuePct}%`;
-  document.getElementById('viz-success').style.width = `${Math.max(0, Math.min(100, successPct))}%`;
-}
-
-function renderBackfill(summary, busy = false) {
-  const btn = document.getElementById('trigger-backfill');
-  btn.disabled = !!busy;
-  document.getElementById('backfill-hint').textContent = busy ? 'Backfill running…' : 'Runs up to the configured backfill limit.';
-  if (!summary) {
-    document.getElementById('backfill-caption').textContent = 'No runs yet.';
-    return;
-  }
-  document.getElementById('backfill-caption').textContent = `${summary.selected || 0} selected • ${summary.enqueued || 0} enqueued`;
-  document.getElementById('bf-selected').textContent = summary.selected ?? '--';
-  document.getElementById('bf-enqueued').textContent = summary.enqueued ?? '--';
-  document.getElementById('bf-dropped').textContent = summary.dropped_full ?? '--';
-  document.getElementById('bf-errors').textContent = summary.other_errors ?? '--';
-  document.getElementById('bf-processed').textContent = summary.already_processed ?? '--';
-  document.getElementById('bf-unprocessed').textContent = summary.unprocessed ?? '--';
-}
-
-async function runBackfill() {
-  const btn = document.getElementById('trigger-backfill');
-  btn.disabled = true;
-  document.getElementById('backfill-hint').textContent = 'Starting backfill…';
-  try {
-    const res = await fetch('/api/backfill', { method: 'POST' });
-    if (!res.ok) throw new Error('failed');
-    const data = await res.json();
-    if (data.status === 'busy') {
-      document.getElementById('backfill-hint').textContent = 'Backfill already running.';
+  function renderDetail(call) {
+    state.selected = call;
+    transcriptEl.classList.remove('playing');
+    detailTitle.textContent = call.pretty_title || call.filename;
+    detailMeta.textContent = `${call.town || 'Unknown town'} • ${formatDate(call.call_timestamp)} • ${call.audio_url ? 'Audio ready' : 'No audio'}`;
+    detailStatus.textContent = call.status;
+    detailStatus.className = `badge ${call.status}`;
+    detailType.textContent = call.call_type || '—';
+    detailAgency.textContent = call.agency || call.town || '—';
+    updatedAtEl.textContent = `Updated ${formatDate(call.updated_at)}`;
+    renderTags(detailTags, call.tags || []);
+    transcriptEl.textContent = call.clean_transcript_text || call.raw_transcript_text || call.transcript_text || 'Transcript pending.';
+    if (call.audio_url) {
+      playBtn.disabled = true;
+      createWave(call.audio_url);
+      playBtn.disabled = false;
+      downloadLink.href = call.audio_url;
     } else {
-      document.getElementById('backfill-hint').textContent = 'Backfill started.';
-      setTimeout(loadStatus, 500);
+      playBtn.disabled = true;
+      downloadLink.removeAttribute('href');
     }
-  } catch (e) {
-    document.getElementById('backfill-hint').textContent = 'Unable to start backfill right now.';
+    regenBtn.disabled = false;
+    renderList();
   }
-}
 
-async function loadSettings() {
-  try {
-    const res = await fetch('/api/settings');
-    if (!res.ok) return;
-    const data = await res.json();
-    document.getElementById('setting-model').value = data.DefaultModel || 'gpt-4o-transcribe';
-    document.getElementById('setting-mode').value = data.DefaultMode || 'transcribe';
-    document.getElementById('setting-format').value = data.DefaultFormat || 'json';
-    document.getElementById('setting-auto').checked = !!data.AutoTranslate;
-    document.getElementById('setting-webhooks').value = (data.WebhookEndpoints || []).join('\n');
-    document.getElementById('setting-cleanup').value = data.CleanupPrompt || flags.defaultCleanup;
-  } catch (e) {
-    document.getElementById('setting-cleanup').value = flags.defaultCleanup;
+  async function selectCall(call) {
+    renderDetail(call);
   }
-}
 
-function resetCleanupPrompt() {
-  document.getElementById('setting-cleanup').value = flags.defaultCleanup;
-}
+  function applyStats() {
+    if (!state.stats) return;
+    const statusLabels = Object.keys(state.stats.status_counts || {});
+    const statusValues = statusLabels.map((key) => state.stats.status_counts[key]);
+    Plotly.newPlot('status-chart', [{ type: 'bar', x: statusLabels, y: statusValues, marker: { color: '#7ce7ff' } }], {
+      margin: { t: 10, l: 30, r: 10, b: 30 },
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+      font: { color: '#e8eeff' },
+    }, { displayModeBar: false });
 
-async function saveSettings(e) {
-  e.preventDefault();
-  const payload = {
-    DefaultModel: document.getElementById('setting-model').value,
-    DefaultMode: document.getElementById('setting-mode').value,
-    DefaultFormat: document.getElementById('setting-format').value,
-    AutoTranslate: document.getElementById('setting-auto').checked,
-    WebhookEndpoints: document.getElementById('setting-webhooks').value.split('\n').map((v) => v.trim()).filter(Boolean),
-    CleanupPrompt: document.getElementById('setting-cleanup').value || flags.defaultCleanup,
-  };
-  await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-}
-
-function toggleTagFilter(tag) {
-  state.tagFilter = state.tagFilter === tag ? null : tag;
-  renderTagFilterPill();
-  renderList();
-}
-
-function renderTagFilterPill() {
-  const pill = document.getElementById('active-tag-filter');
-  const hint = document.getElementById('active-tag-hint');
-  if (state.tagFilter) {
-    pill.textContent = `Filtering by tag: ${state.tagFilter}`;
-    pill.className = 'badge tag';
-    pill.onclick = () => toggleTagFilter(state.tagFilter);
-    hint.classList.remove('hidden');
-  } else {
-    pill.textContent = '';
-    pill.className = 'hidden';
-    pill.onclick = null;
-    hint.classList.add('hidden');
+    const tagEntries = Object.entries(state.stats.tag_counts || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    Plotly.newPlot('tag-chart', [{ type: 'bar', x: tagEntries.map((e) => e[0]), y: tagEntries.map((e) => e[1]), marker: { color: '#5ef5a4' } }], {
+      margin: { t: 10, l: 30, r: 10, b: 30 },
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+      font: { color: '#e8eeff' },
+    }, { displayModeBar: false });
   }
-}
 
-function setupAdminVisibility() {
-  if (flags.devMode) return;
-  document.querySelectorAll('.admin-only').forEach((el) => {
-    el.classList.add('hidden');
-    el.setAttribute('aria-hidden', 'true');
+  function renderTagFilterOptions() {
+    tagFilterEl.innerHTML = '';
+    if (!state.stats) return;
+    const tags = Object.keys(state.stats.tag_counts || {}).sort((a, b) => state.stats.tag_counts[b] - state.stats.tag_counts[a]).slice(0, 12);
+    if (!tags.length) {
+      const hint = document.createElement('span');
+      hint.className = 'muted';
+      hint.textContent = 'Tags will appear once transcripts are ready.';
+      tagFilterEl.appendChild(hint);
+      return;
+    }
+    tags.forEach((tag) => {
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'tag';
+      pill.textContent = tag;
+      if (state.tagFilter.includes(tag.toLowerCase())) pill.classList.add('active');
+      pill.addEventListener('click', () => toggleTag(tag));
+      tagFilterEl.appendChild(pill);
+    });
+  }
+
+  async function fetchCalls() {
+    const params = new URLSearchParams();
+    params.set('window', state.window);
+    if (state.search) params.set('q', state.search);
+    if (state.status) params.set('status', state.status);
+    if (state.tagFilter.length) params.set('tags', state.tagFilter.join(','));
+    const res = await fetch(`/api/transcriptions?${params.toString()}`);
+    if (!res.ok) {
+      console.error('Failed to load calls');
+      return;
+    }
+    const payload = await res.json();
+    state.calls = payload.calls || [];
+    state.stats = payload.stats || {};
+    renderList();
+    renderTagFilterOptions();
+    applyStats();
+    if (state.calls.length && (!state.selected || !state.calls.find((c) => c.filename === state.selected.filename))) {
+      renderDetail(state.calls[0]);
+    }
+  }
+
+  async function regenerate() {
+    if (!state.selected) return;
+    regenBtn.disabled = true;
+    try {
+      await fetch(`/api/transcription?filename=${encodeURIComponent(state.selected.filename)}`, { method: 'POST' });
+    } finally {
+      regenBtn.disabled = false;
+      fetchCalls();
+    }
+  }
+
+  searchInput.addEventListener('input', (e) => {
+    state.search = e.target.value;
+    fetchCalls();
   });
-}
+  statusSelect.addEventListener('change', (e) => {
+    state.status = e.target.value;
+    fetchCalls();
+  });
+  refreshBtn.addEventListener('click', fetchCalls);
+  regenBtn.addEventListener('click', regenerate);
+  playBtn.addEventListener('click', () => {
+    if (state.wavesurfer) state.wavesurfer.playPause();
+  });
+  highlightToggle.addEventListener('change', () => {
+    if (!highlightToggle.checked) transcriptEl.classList.remove('playing');
+    if (highlightToggle.checked && state.wavesurfer && state.wavesurfer.isPlaying()) {
+      transcriptEl.classList.add('playing');
+    }
+  });
+  windowButtons.forEach((btn) => btn.addEventListener('click', () => setWindow(btn.dataset.window)));
+
+  fetchCalls();
+})();

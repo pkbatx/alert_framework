@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -12,20 +13,21 @@ import (
 type Config struct {
 	HTTPPort      string
 	CallsDir      string
-	BackfillLimit int
 	JobQueueSize  int
 	WorkerCount   int
 	JobTimeoutSec int
 	GroupMeBotID  string
 	GroupMeToken  string
+	WorkDir       string
+	DBPath        string
 	DevUI         bool
 }
 
 const (
 	defaultPort          = ":8000"
 	defaultCallsDir      = "/home/peebs/calls"
-	defaultBackfillLimit = 15
-	maxBackfillLimit     = 50
+	defaultWorkDir       = "/home/peebs/ai_transcribe"
+	defaultDBPath        = defaultWorkDir + "/transcriptions.db"
 	minQueueSize         = 1
 	defaultQueueSize     = 100
 	maxQueueSize         = 1024
@@ -38,13 +40,17 @@ func Load() (Config, error) {
 	cfg := Config{
 		HTTPPort:      getEnv("HTTP_PORT", defaultPort),
 		CallsDir:      getEnv("CALLS_DIR", defaultCallsDir),
-		BackfillLimit: defaultBackfillLimit,
 		JobQueueSize:  defaultQueueSize,
 		WorkerCount:   defaultWorkerCount,
 		JobTimeoutSec: defaultJobTimeoutSec,
 		GroupMeBotID:  os.Getenv("GROUPME_BOT_ID"),
 		GroupMeToken:  os.Getenv("GROUPME_ACCESS_TOKEN"),
+		WorkDir:       getEnv("WORK_DIR", defaultWorkDir),
+		DBPath:        getEnv("DB_PATH", defaultDBPath),
 		DevUI:         parseBoolEnv("DEV_UI"),
+	}
+	if os.Getenv("DB_PATH") == "" {
+		cfg.DBPath = filepath.Join(cfg.WorkDir, filepath.Base(defaultDBPath))
 	}
 
 	if legacyPort := os.Getenv("PORT"); legacyPort != "" && cfg.HTTPPort == defaultPort {
@@ -52,23 +58,6 @@ func Load() (Config, error) {
 	}
 	if !strings.HasPrefix(cfg.HTTPPort, ":") {
 		cfg.HTTPPort = ":" + cfg.HTTPPort
-	}
-
-	if v := os.Getenv("BACKFILL_LIMIT"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			log.Printf("invalid BACKFILL_LIMIT=%q, clamping to %d", v, maxBackfillLimit)
-			n = maxBackfillLimit
-		}
-		if n < 0 {
-			log.Printf("BACKFILL_LIMIT must be non-negative, using default %d", defaultBackfillLimit)
-			n = defaultBackfillLimit
-		}
-		if n > maxBackfillLimit {
-			log.Printf("BACKFILL_LIMIT capped at %d (was %d)", maxBackfillLimit, n)
-			n = maxBackfillLimit
-		}
-		cfg.BackfillLimit = n
 	}
 
 	if v := os.Getenv("WORKER_COUNT"); v != "" {

@@ -1,12 +1,8 @@
 package metrics
 
-import (
-	"alert_framework/backfill"
-	"sync"
-	"sync/atomic"
-)
+import "sync/atomic"
 
-// Metrics captures shared operational stats for the queue, workers, and backfill.
+// Metrics captures shared operational stats for the queue and workers.
 type Metrics struct {
 	queueLength   int64
 	queueCapacity int64
@@ -14,25 +10,16 @@ type Metrics struct {
 
 	processedJobs int64
 	failedJobs    int64
-
-	mu             sync.RWMutex
-	lastBackfill   BackfillStats
-	hasBackfillRun atomic.Bool
 }
 
 // Snapshot provides a consistent view of the current metrics.
 type Snapshot struct {
-	QueueLength    int
-	QueueCapacity  int
-	WorkerCount    int
-	ProcessedJobs  int64
-	FailedJobs     int64
-	LastBackfill   BackfillStats
-	HasBackfillRun bool
+	QueueLength   int
+	QueueCapacity int
+	WorkerCount   int
+	ProcessedJobs int64
+	FailedJobs    int64
 }
-
-// BackfillStats mirrors the backfill summary for reporting.
-type BackfillStats = backfill.Summary
 
 // New creates a zeroed Metrics instance.
 func New() *Metrics {
@@ -54,26 +41,13 @@ func (m *Metrics) RecordJobCompletion(err error) {
 	}
 }
 
-// SetBackfill marks the most recent backfill summary.
-func (m *Metrics) SetBackfill(summary BackfillStats) {
-	m.mu.Lock()
-	m.lastBackfill = summary
-	m.mu.Unlock()
-	m.hasBackfillRun.Store(true)
-}
-
 // Snapshot returns a read-only view of metrics.
 func (m *Metrics) Snapshot() Snapshot {
-	m.mu.RLock()
-	last := m.lastBackfill
-	m.mu.RUnlock()
 	return Snapshot{
-		QueueLength:    int(atomic.LoadInt64(&m.queueLength)),
-		QueueCapacity:  int(atomic.LoadInt64(&m.queueCapacity)),
-		WorkerCount:    int(atomic.LoadInt64(&m.workerCount)),
-		ProcessedJobs:  atomic.LoadInt64(&m.processedJobs),
-		FailedJobs:     atomic.LoadInt64(&m.failedJobs),
-		LastBackfill:   last,
-		HasBackfillRun: m.hasBackfillRun.Load(),
+		QueueLength:   int(atomic.LoadInt64(&m.queueLength)),
+		QueueCapacity: int(atomic.LoadInt64(&m.queueCapacity)),
+		WorkerCount:   int(atomic.LoadInt64(&m.workerCount)),
+		ProcessedJobs: atomic.LoadInt64(&m.processedJobs),
+		FailedJobs:    atomic.LoadInt64(&m.failedJobs),
 	}
 }
