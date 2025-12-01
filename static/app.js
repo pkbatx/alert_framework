@@ -18,6 +18,7 @@
   const detailType = document.getElementById('detail-type');
   const detailAgency = document.getElementById('detail-agency');
   const detailTags = document.getElementById('detail-tags');
+  const mapChart = document.getElementById('map-chart');
   const updatedAtEl = document.getElementById('updated-at');
   const tagFilterEl = document.getElementById('tag-filter');
 
@@ -31,6 +32,7 @@
     selected: null,
     wavesurfer: null,
     segments: [],
+    mapboxToken: '',
   };
 
   function setWindow(next) {
@@ -225,7 +227,11 @@
       transcriptEl.classList.remove('playing');
       updateTranscriptHighlight(null);
     });
-    ws.on('error', (e) => console.error('WaveSurfer error', e));
+    ws.on('error', (e) => {
+      console.error('WaveSurfer error', e);
+      playBtn.disabled = true;
+      downloadLink.textContent = 'Audio unavailable';
+    });
     ws.load(url);
     state.wavesurfer = ws;
   }
@@ -247,10 +253,12 @@
       createWave(call.audio_url);
       playBtn.disabled = false;
       downloadLink.href = call.audio_url;
+      downloadLink.textContent = 'Open audio';
     } else {
       destroyWave();
       playBtn.disabled = true;
       downloadLink.removeAttribute('href');
+      downloadLink.textContent = 'Open audio';
     }
     regenBtn.disabled = false;
     renderList();
@@ -260,24 +268,83 @@
     renderDetail(call);
   }
 
+  const baseChartLayout = {
+    margin: { t: 10, l: 30, r: 10, b: 30 },
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    font: { color: '#e8eeff' },
+  };
+
+  function renderBarChart(targetId, labels, values, color, emptyLabel) {
+    const el = document.getElementById(targetId);
+    if (!labels.length || !values.length) {
+      if (el) {
+        el.innerHTML = `<p class="muted">${emptyLabel}</p>`;
+      }
+      Plotly.purge(targetId);
+      return;
+    }
+    Plotly.newPlot(targetId, [{ type: 'bar', x: labels, y: values, marker: { color } }], baseChartLayout, { displayModeBar: false });
+  }
+
+  function renderMap() {
+    if (!mapChart) return;
+    const points = state.calls
+      .filter((call) => call.location && Number.isFinite(call.location.latitude) && Number.isFinite(call.location.longitude))
+      .map((call) => ({
+        lat: call.location.latitude,
+        lon: call.location.longitude,
+        label: call.location.label || call.pretty_title || call.filename,
+      }));
+
+    if (!state.mapboxToken) {
+      mapChart.innerHTML = '<p class="muted">Add MAPBOX_TOKEN to enable mapping.</p>';
+      Plotly.purge('map-chart');
+      return;
+    }
+
+    if (!points.length) {
+      mapChart.innerHTML = '<p class="muted">No mappable calls in this window yet.</p>';
+      Plotly.purge('map-chart');
+      return;
+    }
+
+    Plotly.setPlotConfig({ mapboxAccessToken: state.mapboxToken });
+    Plotly.newPlot('map-chart', [{
+      type: 'scattermapbox',
+      lat: points.map((p) => p.lat),
+      lon: points.map((p) => p.lon),
+      text: points.map((p) => p.label),
+      marker: { size: 10, color: '#7ce7ff' },
+      hovertemplate: '%{text}<extra></extra>',
+    }], {
+      mapbox: {
+        style: 'mapbox/dark-v11',
+        center: { lon: -74.696, lat: 41.05 },
+        zoom: 8,
+      },
+      margin: { t: 0, l: 0, r: 0, b: 0 },
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+    }, { displayModeBar: false });
+  }
+
   function applyStats() {
     if (!state.stats) return;
     const statusLabels = Object.keys(state.stats.status_counts || {});
     const statusValues = statusLabels.map((key) => state.stats.status_counts[key]);
-    Plotly.newPlot('status-chart', [{ type: 'bar', x: statusLabels, y: statusValues, marker: { color: '#7ce7ff' } }], {
-      margin: { t: 10, l: 30, r: 10, b: 30 },
-      paper_bgcolor: 'transparent',
-      plot_bgcolor: 'transparent',
-      font: { color: '#e8eeff' },
-    }, { displayModeBar: false });
+    renderBarChart('status-chart', statusLabels, statusValues, '#7ce7ff', 'No calls yet.');
 
     const tagEntries = Object.entries(state.stats.tag_counts || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
-    Plotly.newPlot('tag-chart', [{ type: 'bar', x: tagEntries.map((e) => e[0]), y: tagEntries.map((e) => e[1]), marker: { color: '#5ef5a4' } }], {
-      margin: { t: 10, l: 30, r: 10, b: 30 },
-      paper_bgcolor: 'transparent',
-      plot_bgcolor: 'transparent',
-      font: { color: '#e8eeff' },
-    }, { displayModeBar: false });
+    renderBarChart('tag-chart', tagEntries.map((e) => e[0]), tagEntries.map((e) => e[1]), '#5ef5a4', 'Tags will appear once transcripts are ready.');
+
+    const agencyEntries = Object.entries(state.stats.agency_counts || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    renderBarChart('agency-chart', agencyEntries.map((e) => e[0]), agencyEntries.map((e) => e[1]), '#a5b6ff', 'Agencies populate once calls arrive.');
+
+    const townEntries = Object.entries(state.stats.town_counts || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    renderBarChart('town-chart', townEntries.map((e) => e[0]), townEntries.map((e) => e[1]), '#ffd166', 'No towns recognized yet.');
+
+    renderMap();
   }
 
   function renderTagFilterOptions() {
@@ -314,7 +381,8 @@
       return;
     }
     const payload = await res.json();
-    state.calls = payload.calls || [];
+    state.mapboxToken = payload.mapbox_token || state.mapboxToken;
+    state.calls = (payload.calls || []).sort((a, b) => new Date(b.call_timestamp || 0) - new Date(a.call_timestamp || 0));
     state.stats = payload.stats || {};
     renderList();
     renderTagFilterOptions();
