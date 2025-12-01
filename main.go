@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"alert_framework/backfill"
 	"alert_framework/config"
 	"alert_framework/formatting"
 	"alert_framework/metrics"
@@ -272,15 +273,21 @@ type server struct {
 	cfg      config.Config
 	tz       *time.Location
 	ctx      context.Context
+
+	backfillMu      sync.Mutex
+	backfillRunning bool
 }
 
 // QueueDebugResponse represents the payload returned from /debug/queue.
 type QueueDebugResponse struct {
-	Length        int   `json:"length"`
-	Capacity      int   `json:"capacity"`
-	Workers       int   `json:"workers"`
-	ProcessedJobs int64 `json:"processed_jobs"`
-	FailedJobs    int64 `json:"failed_jobs"`
+	Length        int                   `json:"length"`
+	Capacity      int                   `json:"capacity"`
+	Workers       int                   `json:"workers"`
+	ProcessedJobs int64                 `json:"processed_jobs"`
+	FailedJobs    int64                 `json:"failed_jobs"`
+	LastBackfill  metrics.BackfillStats `json:"last_backfill"`
+	HasBackfill   bool                  `json:"has_backfill"`
+	BackfillBusy  bool                  `json:"backfill_running"`
 }
 
 func (s *server) defaultOptions() (TranscriptionOptions, error) {
@@ -343,12 +350,15 @@ func main() {
 	m.UpdateQueue(qStats.Length, qStats.Capacity, qStats.WorkerCount)
 
 	go s.watch()
+	log.Printf("starting backfill with limit=%d queue_size=%d workers=%d", cfg.BackfillLimit, cfg.JobQueueSize, cfg.WorkerCount)
+	s.startBackfill(cfg.BackfillLimit)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/transcriptions", s.handleTranscriptions)
 	mux.HandleFunc("/api/transcription/", s.handleTranscription)
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/backfill", s.handleBackfill)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/debug/queue", s.handleDebugQueue)
@@ -720,6 +730,106 @@ func (s *server) buildJobContext(filename string) (formatting.CallMetadata, stri
 
 func (s *server) publicURL(filename string) string {
 	return fmt.Sprintf("https://calls.sussexcountyalerts.com/%s", url.PathEscape(filename))
+}
+
+func (s *server) ListCandidates(ctx context.Context) ([]backfill.Record, error) {
+	entries, err := os.ReadDir(s.cfg.CallsDir)
+	if err != nil {
+		return nil, err
+	}
+	statusMap := make(map[string]backfill.Record)
+	rows, err := queryWithRetry(s.db, `SELECT filename, status, updated_at FROM transcriptions`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var filename, status string
+			var updatedAt time.Time
+			if err := rows.Scan(&filename, &status, &updatedAt); err != nil {
+				continue
+			}
+			statusMap[filename] = backfill.Record{Filename: filename, Status: status, UpdatedAt: updatedAt}
+		}
+	}
+
+	records := make([]backfill.Record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		rec := backfill.Record{
+			Filename:  entry.Name(),
+			ModTime:   info.ModTime(),
+			SizeBytes: info.Size(),
+		}
+		if st, ok := statusMap[rec.Filename]; ok {
+			rec.Status = st.Status
+			rec.UpdatedAt = st.UpdatedAt
+		}
+		records = append(records, rec)
+	}
+	return records, nil
+}
+
+func (s *server) OnBackfillComplete(summary backfill.Summary) {
+	s.metrics.SetBackfill(summary)
+	if summary.DroppedFull > 0 {
+		log.Printf("backfill dropped %d jobs because queue remained full", summary.DroppedFull)
+	}
+	s.backfillMu.Lock()
+	s.backfillRunning = false
+	s.backfillMu.Unlock()
+}
+
+func (s *server) startBackfill(limit int) bool {
+	s.backfillMu.Lock()
+	if s.backfillRunning {
+		s.backfillMu.Unlock()
+		return false
+	}
+	s.backfillRunning = true
+	s.backfillMu.Unlock()
+
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	backfill.Run(ctx, s, limit)
+	return true
+}
+
+func (s *server) isBackfillRunning() bool {
+	s.backfillMu.Lock()
+	defer s.backfillMu.Unlock()
+	return s.backfillRunning
+}
+
+func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) (backfill.EnqueueResult, error) {
+	if rec.Status == statusDone {
+		return backfill.EnqueueResult{}, nil
+	}
+	stale := time.Since(rec.UpdatedAt) > processingStaleAfter
+	if rec.Status == statusProcessing && !stale {
+		return backfill.EnqueueResult{}, nil
+	}
+	if rec.Status == statusQueued && !stale {
+		return backfill.EnqueueResult{}, nil
+	}
+	force := rec.Status == statusProcessing && stale
+	opts, err := s.defaultOptions()
+	if err != nil {
+		log.Printf("using default options with error: %v", err)
+	}
+	sourcePath := filepath.Join(s.cfg.CallsDir, rec.Filename)
+	if err := s.markQueued(rec.Filename, sourcePath, "backfill", rec.SizeBytes, opts); err != nil {
+		log.Printf("mark queued failed for %s: %v", rec.Filename, err)
+		return backfill.EnqueueResult{}, err
+	}
+	enqueued, dropped := s.enqueueWithBackoff(ctx, "backfill", rec.Filename, false, force, opts)
+	return backfill.EnqueueResult{Enqueued: enqueued, DroppedFull: dropped}, nil
 }
 
 func (s *server) processFile(ctx context.Context, j processJob) error {
@@ -1392,6 +1502,9 @@ func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
 		Workers:       stats.WorkerCount,
 		ProcessedJobs: snapshot.ProcessedJobs,
 		FailedJobs:    snapshot.FailedJobs,
+		LastBackfill:  snapshot.LastBackfill,
+		HasBackfill:   snapshot.HasBackfillRun,
+		BackfillBusy:  s.isBackfillRunning(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1462,6 +1575,26 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *server) handleBackfill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+
+	limit := s.cfg.BackfillLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	started := s.startBackfill(limit)
+	if !started {
+		respondJSON(w, map[string]string{"status": "busy"})
+		return
+	}
+	respondJSON(w, map[string]interface{}{"status": "started", "limit": limit})
 }
 
 func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -1683,8 +1816,6 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	statusFilter := r.URL.Query().Get("status")
 	townFilter := strings.TrimSpace(r.URL.Query().Get("town"))
 	callTypeFilter := strings.TrimSpace(r.URL.Query().Get("call_type"))
-	tagFilter := strings.TrimSpace(r.URL.Query().Get("tag"))
-	window := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("window")))
 	sortBy := r.URL.Query().Get("sort")
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page < 1 {
@@ -1699,15 +1830,6 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, created_at, updated_at FROM transcriptions`
 	var where []string
 	var args []interface{}
-	windowCutoff := time.Now().Add(-24 * time.Hour)
-	switch window {
-	case "7d", "7days", "7":
-		windowCutoff = time.Now().Add(-7 * 24 * time.Hour)
-	case "30d", "30days", "30":
-		windowCutoff = time.Now().Add(-30 * 24 * time.Hour)
-	}
-	where = append(where, "updated_at >= ?")
-	args = append(args, windowCutoff)
 	if search != "" {
 		like := "%" + strings.ToLower(search) + "%"
 		where = append(where, "(lower(filename) LIKE ? OR lower(coalesce(clean_transcript_text, transcript_text, '')) LIKE ? OR lower(coalesce(raw_transcript_text, '')) LIKE ? OR lower(coalesce(normalized_transcript, '')) LIKE ?)")
@@ -1754,26 +1876,9 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		resp := s.toResponse(t)
-		if tagFilter != "" && !containsTag(resp.Tags, tagFilter) {
-			continue
-		}
-		result = append(result, resp)
+		result = append(result, s.toResponse(t))
 	}
 	respondJSON(w, result)
-}
-
-func containsTag(tags []string, needle string) bool {
-	if len(tags) == 0 {
-		return false
-	}
-	needle = strings.ToLower(strings.TrimSpace(needle))
-	for _, t := range tags {
-		if strings.ToLower(strings.TrimSpace(t)) == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func respondJSON(w http.ResponseWriter, v interface{}) {
