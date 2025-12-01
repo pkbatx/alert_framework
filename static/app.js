@@ -30,6 +30,7 @@
     stats: null,
     selected: null,
     wavesurfer: null,
+    segments: [],
   };
 
   function setWindow(next) {
@@ -106,23 +107,127 @@
     totalCount.textContent = `${state.calls.length} calls`;
   }
 
-  function createWave(url) {
+  function formatTimecode(seconds = 0) {
+    const total = Math.max(0, Math.floor(seconds));
+    const mins = String(Math.floor(total / 60)).padStart(2, '0');
+    const secs = String(total % 60).padStart(2, '0');
+    return `${mins}:${secs}`;
+  }
+
+  function normalizeSegments(call) {
+    const rawSegments = Array.isArray(call.segments) ? call.segments : [];
+    const cleaned = rawSegments
+      .map((seg) => ({
+        start: Number(seg.start) || 0,
+        end: Number(seg.end) || (Number(seg.start) || 0) + 0.5,
+        text: (seg.text || '').trim(),
+        speaker: seg.speaker || '',
+      }))
+      .filter((seg) => seg.text && seg.end > seg.start);
+    if (cleaned.length) return cleaned;
+
+    const text = (call.clean_transcript_text || call.raw_transcript_text || call.transcript_text || '').trim();
+    if (!text) return [];
+    const duration = Number(call.duration_seconds) || 0;
+    return [
+      {
+        start: 0,
+        end: duration > 0 ? duration : Math.max(1, text.split(/\s+/).length * 0.5),
+        text,
+      },
+    ];
+  }
+
+  function renderTranscript(call) {
+    state.segments = normalizeSegments(call);
+    transcriptEl.innerHTML = '';
+    transcriptEl.classList.toggle('playing', highlightToggle.checked && state.wavesurfer && state.wavesurfer.isPlaying());
+    if (!state.segments.length) {
+      const placeholder = document.createElement('p');
+      placeholder.className = 'muted';
+      placeholder.textContent = 'Transcript pending.';
+      transcriptEl.appendChild(placeholder);
+      return;
+    }
+    state.segments.forEach((segment) => {
+      const row = document.createElement('div');
+      row.className = 'transcript-segment';
+      row.dataset.start = segment.start;
+      row.dataset.end = segment.end;
+      const ts = document.createElement('span');
+      ts.className = 'timestamp';
+      ts.textContent = formatTimecode(segment.start);
+      const text = document.createElement('span');
+      text.className = 'text';
+      text.textContent = segment.text;
+      row.appendChild(ts);
+      row.appendChild(text);
+      row.addEventListener('click', () => {
+        if (state.wavesurfer) {
+          state.wavesurfer.setTime(segment.start);
+          state.wavesurfer.play();
+          updateTranscriptHighlight(segment.start);
+        }
+      });
+      transcriptEl.appendChild(row);
+    });
+    updateTranscriptHighlight(0);
+  }
+
+  function updateTranscriptHighlight(time) {
+    const rows = transcriptEl.querySelectorAll('.transcript-segment');
+    rows.forEach((row) => row.classList.remove('active'));
+    if (!highlightToggle.checked || time === null || !rows.length) return;
+    const active = Array.from(rows).find((row) => {
+      const start = Number(row.dataset.start) || 0;
+      const end = Number(row.dataset.end) || start;
+      return time >= start && time < end;
+    });
+    if (active) {
+      active.classList.add('active');
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function destroyWave() {
     if (state.wavesurfer) {
       state.wavesurfer.destroy();
       state.wavesurfer = null;
     }
-    state.wavesurfer = WaveSurfer.create({
+    waveformEl.innerHTML = '';
+  }
+
+  function createWave(url) {
+    destroyWave();
+    const ws = WaveSurfer.create({
       container: waveformEl,
       waveColor: '#7ce7ff',
       progressColor: '#5ef5a4',
       height: 80,
       cursorWidth: 1,
+      backend: 'MediaElement',
+      mediaControls: false,
+      removeMediaElementOnDestroy: true,
+      normalize: true,
     });
-    state.wavesurfer.load(url);
-    state.wavesurfer.on('ready', () => playBtn.removeAttribute('disabled'));
-    state.wavesurfer.on('error', (e) => console.error('WaveSurfer error', e));
-    state.wavesurfer.on('play', () => transcriptEl.classList.toggle('playing', highlightToggle.checked));
-    state.wavesurfer.on('pause', () => transcriptEl.classList.remove('playing'));
+    const handleTime = () => updateTranscriptHighlight(ws.getCurrentTime());
+    ws.on('ready', () => {
+      playBtn.removeAttribute('disabled');
+      handleTime();
+    });
+    ws.on('audioprocess', handleTime);
+    ws.on('timeupdate', handleTime);
+    ws.on('seeking', handleTime);
+    ws.on('interaction', handleTime);
+    ws.on('play', () => transcriptEl.classList.toggle('playing', highlightToggle.checked));
+    ws.on('pause', () => transcriptEl.classList.remove('playing'));
+    ws.on('finish', () => {
+      transcriptEl.classList.remove('playing');
+      updateTranscriptHighlight(null);
+    });
+    ws.on('error', (e) => console.error('WaveSurfer error', e));
+    ws.load(url);
+    state.wavesurfer = ws;
   }
 
   function renderDetail(call) {
@@ -136,13 +241,14 @@
     detailAgency.textContent = call.agency || call.town || '—';
     updatedAtEl.textContent = `Updated ${formatDate(call.updated_at)}`;
     renderTags(detailTags, call.tags || []);
-    transcriptEl.textContent = call.clean_transcript_text || call.raw_transcript_text || call.transcript_text || 'Transcript pending.';
+    renderTranscript(call);
     if (call.audio_url) {
       playBtn.disabled = true;
       createWave(call.audio_url);
       playBtn.disabled = false;
       downloadLink.href = call.audio_url;
     } else {
+      destroyWave();
       playBtn.disabled = true;
       downloadLink.removeAttribute('href');
     }
@@ -243,10 +349,16 @@
     if (state.wavesurfer) state.wavesurfer.playPause();
   });
   highlightToggle.addEventListener('change', () => {
-    if (!highlightToggle.checked) transcriptEl.classList.remove('playing');
-    if (highlightToggle.checked && state.wavesurfer && state.wavesurfer.isPlaying()) {
+    if (!highlightToggle.checked) {
+      transcriptEl.classList.remove('playing');
+      updateTranscriptHighlight(null);
+      return;
+    }
+    const currentTime = state.wavesurfer ? state.wavesurfer.getCurrentTime() : 0;
+    if (state.wavesurfer && state.wavesurfer.isPlaying()) {
       transcriptEl.classList.add('playing');
     }
+    updateTranscriptHighlight(currentTime);
   });
   windowButtons.forEach((btn) => btn.addEventListener('click', () => setWindow(btn.dataset.window)));
 
