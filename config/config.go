@@ -20,7 +20,9 @@ const (
 	defaultPort          = "8000"
 	defaultBackfillLimit = 15
 	maxBackfillLimit     = 50
+	minQueueSize         = 64
 	defaultQueueSize     = 100
+	maxQueueSize         = 1024
 	defaultWorkerCount   = 4
 	defaultJobTimeoutSec = 60
 )
@@ -38,10 +40,12 @@ func Load() (Config, error) {
 	if v := os.Getenv("BACKFILL_LIMIT"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return cfg, fmt.Errorf("invalid BACKFILL_LIMIT: %w", err)
+			log.Printf("invalid BACKFILL_LIMIT=%q, clamping to %d", v, maxBackfillLimit)
+			n = maxBackfillLimit
 		}
 		if n < 0 {
-			return cfg, fmt.Errorf("BACKFILL_LIMIT must be non-negative")
+			log.Printf("BACKFILL_LIMIT must be non-negative, using default %d", defaultBackfillLimit)
+			n = defaultBackfillLimit
 		}
 		if n > maxBackfillLimit {
 			log.Printf("BACKFILL_LIMIT capped at %d (was %d)", maxBackfillLimit, n)
@@ -53,10 +57,16 @@ func Load() (Config, error) {
 	if v := os.Getenv("JOB_QUEUE_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return cfg, fmt.Errorf("invalid JOB_QUEUE_SIZE: %w", err)
+			log.Printf("invalid JOB_QUEUE_SIZE=%q, using default %d", v, defaultQueueSize)
+			n = defaultQueueSize
 		}
-		if n <= 0 {
-			return cfg, fmt.Errorf("JOB_QUEUE_SIZE must be positive")
+		if n < minQueueSize {
+			log.Printf("JOB_QUEUE_SIZE raised to minimum %d (was %d)", minQueueSize, n)
+			n = minQueueSize
+		}
+		if n > maxQueueSize {
+			log.Printf("JOB_QUEUE_SIZE capped at %d (was %d)", maxQueueSize, n)
+			n = maxQueueSize
 		}
 		cfg.JobQueueSize = n
 	}
@@ -64,10 +74,12 @@ func Load() (Config, error) {
 	if v := os.Getenv("WORKER_COUNT"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return cfg, fmt.Errorf("invalid WORKER_COUNT: %w", err)
+			log.Printf("invalid WORKER_COUNT=%q, using default %d", v, defaultWorkerCount)
+			n = defaultWorkerCount
 		}
 		if n <= 0 {
-			return cfg, fmt.Errorf("WORKER_COUNT must be positive")
+			log.Printf("WORKER_COUNT must be positive, using default %d", defaultWorkerCount)
+			n = defaultWorkerCount
 		}
 		cfg.WorkerCount = n
 	}

@@ -137,13 +137,15 @@ type AppSettings struct {
 }
 
 type server struct {
-	db       *sql.DB
-	queue    *queue.Queue
-	running  sync.Map // filename -> struct{}
-	client   *http.Client
-	botID    string
-	shutdown chan struct{}
-	cfg      config.Config
+	db                  *sql.DB
+	queue               *queue.Queue
+	running             sync.Map // filename -> struct{}
+	client              *http.Client
+	botID               string
+	shutdown            chan struct{}
+	cfg                 config.Config
+	summaryMu           sync.Mutex
+	lastBackfillSummary backfill.Summary
 }
 
 func (s *server) defaultOptions() (TranscriptionOptions, error) {
@@ -190,6 +192,7 @@ func main() {
 	s.queue.Start(ctx)
 
 	go s.watch()
+	log.Printf("starting backfill with limit=%d queue_size=%d workers=%d", cfg.BackfillLimit, cfg.JobQueueSize, cfg.WorkerCount)
 	backfill.Run(ctx, s, cfg.BackfillLimit)
 
 	mux := http.NewServeMux()
@@ -199,6 +202,7 @@ func main() {
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
+	mux.HandleFunc("/debug/queue", s.handleDebugQueue)
 	mux.HandleFunc("/", s.handleRoot)
 
 	server := &http.Server{
@@ -507,7 +511,7 @@ func (s *server) handleNewFile(filename string) {
 		log.Printf("groupme send failed: %v", err)
 	}
 	opts, _ := s.defaultOptions()
-	s.queueJob(filename, true, false, opts)
+	s.queueJob("watcher", filename, true, false, opts)
 }
 
 func (s *server) runPretty(filename string) string {
@@ -526,12 +530,18 @@ func (s *server) runPretty(filename string) string {
 	return trimmed
 }
 
-func (s *server) queueJob(filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) bool {
+func (s *server) queueJob(source, filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) bool {
+	enqueued, _ := s.enqueueWithBackoff(context.Background(), source, filename, sendGroupMe, force, opts)
+	return enqueued
+}
+
+func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) (bool, bool) {
 	if _, exists := s.running.LoadOrStore(filename, struct{}{}); exists && !force {
-		return false
+		return false, false
 	}
 	job := queue.Job{
-		ID: filename,
+		ID:     filename,
+		Source: source,
 		Work: func(ctx context.Context) error {
 			return s.processFile(ctx, processJob{filename: filename, sendGroupMe: sendGroupMe, force: force, options: opts})
 		},
@@ -539,11 +549,13 @@ func (s *server) queueJob(filename string, sendGroupMe bool, force bool, opts Tr
 			s.running.Delete(filename)
 		},
 	}
-	if !s.queue.Enqueue(job) {
+	const backoffWindow = 5 * time.Second
+	const retryInterval = 200 * time.Millisecond
+	enqueued, dropped := s.queue.EnqueueWithRetry(ctx, job, backoffWindow, retryInterval)
+	if !enqueued {
 		s.running.Delete(filename)
-		return false
 	}
-	return true
+	return enqueued, dropped
 }
 
 func (s *server) ListCandidates(ctx context.Context) ([]backfill.Record, error) {
@@ -588,16 +600,31 @@ func (s *server) ListCandidates(ctx context.Context) ([]backfill.Record, error) 
 	return records, nil
 }
 
-func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) bool {
+func (s *server) OnBackfillComplete(summary backfill.Summary) {
+	s.summaryMu.Lock()
+	s.lastBackfillSummary = summary
+	s.summaryMu.Unlock()
+	if summary.EnqueueDroppedFull > 0 {
+		log.Printf("backfill dropped %d jobs because queue remained full", summary.EnqueueDroppedFull)
+	}
+}
+
+func (s *server) getBackfillSummary() backfill.Summary {
+	s.summaryMu.Lock()
+	defer s.summaryMu.Unlock()
+	return s.lastBackfillSummary
+}
+
+func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) backfill.EnqueueResult {
 	if rec.Status == statusDone {
-		return false
+		return backfill.EnqueueResult{}
 	}
 	stale := time.Since(rec.UpdatedAt) > processingStaleAfter
 	if rec.Status == statusProcessing && !stale {
-		return false
+		return backfill.EnqueueResult{}
 	}
 	if rec.Status == statusQueued && !stale {
-		return false
+		return backfill.EnqueueResult{}
 	}
 	force := rec.Status == statusProcessing && stale
 	opts, err := s.defaultOptions()
@@ -607,13 +634,10 @@ func (s *server) QueueRecord(ctx context.Context, rec backfill.Record) bool {
 	sourcePath := filepath.Join(callsDir, rec.Filename)
 	if err := s.markQueued(rec.Filename, sourcePath, rec.SizeBytes, opts); err != nil {
 		log.Printf("mark queued failed for %s: %v", rec.Filename, err)
-		return false
+		return backfill.EnqueueResult{}
 	}
-	enqueued := s.queueJob(rec.Filename, false, force, opts)
-	if !enqueued {
-		log.Printf("backfill queue full for %s", rec.Filename)
-	}
-	return enqueued
+	enqueued, dropped := s.enqueueWithBackoff(ctx, "backfill", rec.Filename, false, force, opts)
+	return backfill.EnqueueResult{Enqueued: enqueued, DroppedFull: dropped}
 }
 
 func (s *server) processFile(ctx context.Context, j processJob) error {
@@ -1242,8 +1266,24 @@ func (s *server) handleReady(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "queue not ready", http.StatusServiceUnavailable)
 		return
 	}
+	if stats := s.queue.Stats(); stats.WorkerCount <= 0 {
+		http.Error(w, "no workers", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ready"))
+}
+
+func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
+	stats := s.queue.Stats()
+	summary := s.getBackfillSummary()
+	respondJSON(w, map[string]interface{}{
+		"current_queue_len":     stats.Length,
+		"job_queue_size":        stats.Capacity,
+		"worker_count":          stats.WorkerCount,
+		"processed_jobs":        stats.Processed,
+		"last_backfill_summary": summary,
+	})
 }
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -1342,7 +1382,7 @@ func (s *server) handleTranscriptionIndex(w http.ResponseWriter, r *http.Request
 			return
 		}
 		opts, _ := s.defaultOptions()
-		s.queueJob(filename, false, true, opts)
+		s.queueJob("api", filename, false, true, opts)
 		respondJSON(w, map[string]string{"status": statusQueued, "filename": filename})
 		return
 	}
@@ -1428,7 +1468,7 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		case statusError:
-			s.queueJob(cleaned, false, true, opts)
+			s.queueJob("api", cleaned, false, true, opts)
 			respondJSON(w, map[string]interface{}{
 				"filename": existing.Filename,
 				"status":   statusQueued,
@@ -1437,7 +1477,7 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.queueJob(cleaned, false, true, opts)
+	s.queueJob("api", cleaned, false, true, opts)
 	respondJSON(w, map[string]interface{}{
 		"filename": cleaned,
 		"status":   statusQueued,

@@ -24,46 +24,84 @@ const (
 	StatusError      = "error"
 )
 
-// SelectPending returns up to limit records sorted by recency that are not fully processed.
-func SelectPending(records []Record, limit int) []Record {
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].ModTime.After(records[j].ModTime)
-	})
-	pending := make([]Record, 0, limit)
-	for _, r := range records {
-		if r.Status == StatusDone {
-			continue
-		}
-		pending = append(pending, r)
-		if len(pending) >= limit {
-			break
-		}
-	}
-	return pending
+// Summary captures backfill execution metrics.
+type Summary struct {
+	TotalCandidates     int `json:"total"`
+	AlreadyProcessed    int `json:"already_processed"`
+	Unprocessed         int `json:"unprocessed"`
+	SelectedForBackfill int `json:"selected"`
+	AttemptedEnqueue    int `json:"attempted_enqueue"`
+	EnqueueSucceeded    int `json:"enqueued"`
+	EnqueueDroppedFull  int `json:"dropped_full"`
+}
+
+// EnqueueResult captures queueing outcome for a record.
+type EnqueueResult struct {
+	Enqueued    bool
+	DroppedFull bool
 }
 
 // Repository describes the data source needed for backfill.
 type Repository interface {
 	ListCandidates(ctx context.Context) ([]Record, error)
-	QueueRecord(ctx context.Context, rec Record) bool
+	QueueRecord(ctx context.Context, rec Record) EnqueueResult
+	OnBackfillComplete(summary Summary)
+}
+
+// SelectPending returns up to limit records sorted by recency that are not fully processed.
+// It also reports a summary of the candidate set.
+func SelectPending(records []Record, limit int) ([]Record, Summary) {
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].ModTime.After(records[j].ModTime)
+	})
+
+	summary := Summary{TotalCandidates: len(records)}
+	unprocessed := make([]Record, 0, len(records))
+	for _, r := range records {
+		if r.Status == StatusDone {
+			summary.AlreadyProcessed++
+			continue
+		}
+		unprocessed = append(unprocessed, r)
+	}
+
+	summary.Unprocessed = len(unprocessed)
+	if limit < summary.Unprocessed {
+		unprocessed = unprocessed[:limit]
+	}
+	summary.SelectedForBackfill = len(unprocessed)
+	return unprocessed, summary
 }
 
 // Run executes the backfill asynchronously.
 func Run(ctx context.Context, repo Repository, limit int) {
 	go func() {
-		log.Printf("starting backfill with limit %d", limit)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		records, err := repo.ListCandidates(ctx)
 		if err != nil {
 			log.Printf("backfill list failed: %v", err)
 			return
 		}
-		pending := SelectPending(records, limit)
-		var enqueued int
-		for _, rec := range pending {
-			if repo.QueueRecord(ctx, rec) {
-				enqueued++
+
+		selected, summary := SelectPending(records, limit)
+		summary.AttemptedEnqueue = len(selected)
+
+		for _, rec := range selected {
+			result := repo.QueueRecord(ctx, rec)
+			if result.Enqueued {
+				summary.EnqueueSucceeded++
+			}
+			if result.DroppedFull {
+				summary.EnqueueDroppedFull++
 			}
 		}
-		log.Printf("backfill candidates=%d enqueued=%d", len(records), enqueued)
+
+		log.Printf("backfill summary: total=%d unprocessed=%d selected=%d enqueued=%d dropped_full=%d already_processed=%d", summary.TotalCandidates, summary.Unprocessed, summary.SelectedForBackfill, summary.EnqueueSucceeded, summary.EnqueueDroppedFull, summary.AlreadyProcessed)
+		repo.OnBackfillComplete(summary)
 	}()
 }
