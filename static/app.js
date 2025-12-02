@@ -790,27 +790,52 @@
     storyList.innerHTML = '';
     const insightCalls = getInsightCalls(getVisibleCalls());
     const items = [];
-    const active = state.calls.filter((call) => ['processing', 'queued'].includes(call.status)).length;
-    if (active) {
+    const formatLabel = (value) => {
+      if (!value) return '';
+      return value
+        .replace(/[_-]+/g, ' ')
+        .split(/\s+/)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+    };
+
+    const totalCompleted = state.stats?.total || insightCalls.length;
+    if (totalCompleted) {
+      const perHour = (totalCompleted / 24).toFixed(1);
       items.push({
-        emoji: '⚡',
-        text: `${active} call${active === 1 ? '' : 's'} actively transcribing or queued right now.`,
+        emoji: '🚨',
+        text: `${totalCompleted} completed incident${totalCompleted === 1 ? '' : 's'} in the last 24 hours (~${perHour} per hour).`,
+      });
+    }
+
+    const callTypeEntries = Object.entries(state.stats?.call_type_counts || {}).sort((a, b) => b[1] - a[1]);
+    if (callTypeEntries.length) {
+      const [primaryType, primaryCount] = callTypeEntries[0];
+      const [, secondaryCount] = callTypeEntries[1] || [];
+      const secondaryLabel = callTypeEntries[1] ? `${formatLabel(callTypeEntries[1][0])} (${secondaryCount})` : null;
+      const topCallTypeText = secondaryLabel
+        ? `Top incident type: ${formatLabel(primaryType)} (${primaryCount}); next: ${secondaryLabel}.`
+        : `Top incident type: ${formatLabel(primaryType)} (${primaryCount}).`;
+      items.push({ emoji: '🚒', text: topCallTypeText });
+    }
+
+    const topTown = Object.entries(state.stats?.town_counts || {}).sort((a, b) => b[1] - a[1])[0];
+    const topAgency = Object.entries(state.stats?.agency_counts || {}).sort((a, b) => b[1] - a[1])[0];
+    if (topTown) {
+      items.push({
+        emoji: '🧭',
+        text: `${formatLabel(topTown[0])} has the most logged incidents (${topTown[1]}) in the last 24 hours.`,
+      });
+    } else if (topAgency) {
+      items.push({
+        emoji: '🏢',
+        text: `${formatLabel(topAgency[0])} is handling the most calls (${topAgency[1]}) this 24-hour window.`,
       });
     }
 
     const pastHour = callsWithinMinutes(insightCalls, 60).length;
     if (pastHour) {
-      items.push({ emoji: '📈', text: `${pastHour} call${pastHour === 1 ? '' : 's'} landed in the past hour.` });
-    }
-
-    const topAgency = Object.entries(state.stats?.agency_counts || {}).sort((a, b) => b[1] - a[1])[0];
-    if (topAgency) {
-      items.push({ emoji: '🏢', text: `${topAgency[0]} is handling ${topAgency[1]} call${topAgency[1] === 1 ? '' : 's'} this window.` });
-    }
-
-    const topTag = Object.entries(state.stats?.tag_counts || {}).sort((a, b) => b[1] - a[1])[0];
-    if (topTag) {
-      items.push({ emoji: '🏷️', text: `Tag “${topTag[0]}” appears ${topTag[1]} time${topTag[1] === 1 ? '' : 's'}.` });
+      items.push({ emoji: '⏱️', text: `${pastHour} incident${pastHour === 1 ? '' : 's'} started in the past hour.` });
     }
 
     const recent = insightCalls[0];
@@ -829,7 +854,7 @@
       return;
     }
 
-    items.slice(0, 4).forEach((item) => {
+    items.slice(0, 5).forEach((item) => {
       const li = document.createElement('li');
       const dot = document.createElement('span');
       dot.className = 'dot';
