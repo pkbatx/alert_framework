@@ -28,50 +28,45 @@
       </div>
     </div>
 
-    <section class="hero">
-      <div class="hero-grid">
-        <div class="hero-copy">
-          <p class="eyebrow">Unified Call Monitor</p>
-          <h1>Stay ahead of every call in one clean view</h1>
-          <p class="muted">Live queue-driven alerts with on-demand transcripts, map awareness, and audio you can scan without losing your place.</p>
-          <div class="hero-actions">
-            <button class="primary" type="button" aria-label="Open the recent calls list">View latest calls</button>
-            <button class="ghost" type="button" aria-label="Learn about the workflow">See how it works</button>
-          </div>
+    <section class="dispatch-shell" aria-label="Live dispatch console">
+      <div class="console-header">
+        <div class="console-title">
+          <p class="eyebrow">Situational awareness</p>
+          <h1>CAD-style command console</h1>
+          <p class="muted">One glance for live incidents, queue health, and field context across the county.</p>
         </div>
-        <div class="hero-visual" aria-hidden="true">
-          <div class="hero-visual-inner">
-            <p class="eyebrow">Realtime status</p>
-            <h3>Queue + transcript health</h3>
-            <ul>
-              <li><strong>24h</strong> snapshot with quick filters</li>
-              <li>Waveform playback inline</li>
-              <li>Regenerate transcripts anytime</li>
-            </ul>
-          </div>
+        <div class="console-actions" role="group" aria-label="Console controls">
+          <div class="pill live">Live monitor</div>
+          <div class="pill calm">Quiet scan</div>
+          <button class="ghost" type="button">Incident log</button>
+          <button class="ghost" type="button">Push status</button>
         </div>
       </div>
-    </section>
 
-    <section class="feature-section" aria-label="Feature highlights">
-      <div class="feature-grid" role="list">
-        <article class="feature" role="listitem">
-          <div class="feature-icon" aria-hidden="true">📡</div>
-          <h3>Live queue monitoring</h3>
-          <p>Track the last 24h, 7d, or 30d with status-aware filters for every call.</p>
-          <button class="text-button" type="button" aria-label="Open the recent calls list">Open calls</button>
+      <div class="status-grid" role="list">
+        <article class="status-card" role="listitem">
+          <div class="status-top">
+            <p class="eyebrow">Open incidents</p>
+            <span class="status-dot active" aria-hidden="true"></span>
+          </div>
+          <h3>On-shift focus</h3>
+          <p class="muted">Sort by newest, severity, or status to triage without leaving the pane.</p>
         </article>
-        <article class="feature" role="listitem">
-          <div class="feature-icon" aria-hidden="true">🗒️</div>
-          <h3>Transcript accuracy</h3>
-          <p>Regenerate transcripts, scan timestamps, and listen without losing your place.</p>
-          <button class="text-button" type="button" aria-label="Jump to transcript tools">Review transcript</button>
+        <article class="status-card" role="listitem">
+          <div class="status-top">
+            <p class="eyebrow">Queue health</p>
+            <span class="status-dot caution" aria-hidden="true"></span>
+          </div>
+          <h3>Jobs + transcripts</h3>
+          <p class="muted">Watch ingest, regen, and processing state in realtime—no refresh needed.</p>
         </article>
-        <article class="feature" role="listitem">
-          <div class="feature-icon" aria-hidden="true">🗺️</div>
-          <h3>Map awareness</h3>
-          <p>Switch between density and point layers to spot activity clusters across towns.</p>
-          <button class="text-button" type="button" aria-label="Open the map view">Open map</button>
+        <article class="status-card" role="listitem">
+          <div class="status-top">
+            <p class="eyebrow">Audio + map</p>
+            <span class="status-dot calm" aria-hidden="true"></span>
+          </div>
+          <h3>Soft monitoring</h3>
+          <p class="muted">Listen, skim the waveform, and pin density vs. points to keep spatial bearings.</p>
         </article>
       </div>
     </section>
