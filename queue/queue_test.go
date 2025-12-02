@@ -41,3 +41,22 @@ func TestStatsTrackProcessedAndFailures(t *testing.T) {
 		t.Fatalf("expected at least one failure recorded")
 	}
 }
+
+func TestQueueRejectsDuplicateJobs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := metrics.New()
+	q := New(2, 1, time.Second, m)
+	q.Start(ctx)
+
+	acceptedFirst := q.Enqueue(Job{ID: "dup", Source: "watcher", Work: func(context.Context) error { return nil }})
+	acceptedSecond := q.Enqueue(Job{ID: "dup", Source: "watcher", Work: func(context.Context) error { return nil }})
+
+	if !acceptedFirst {
+		t.Fatalf("expected first enqueue to succeed")
+	}
+	if acceptedSecond {
+		t.Fatalf("expected duplicate enqueue to be rejected")
+	}
+}
