@@ -25,8 +25,6 @@
   const updatedAtEl = document.getElementById('updated-at');
   const tagFilterEl = document.getElementById('tag-filter');
   const filterChips = document.getElementById('filter-chips');
-  const toggleInsightsBtn = document.getElementById('toggle-insights');
-  const insightsBody = document.getElementById('insights-body');
   const themeToggle = document.getElementById('theme-toggle');
   const toggleAdvancedBtn = document.getElementById('toggle-advanced');
   const advancedFilters = document.getElementById('advanced-filters');
@@ -35,12 +33,15 @@
   const closeFiltersBtn = document.getElementById('close-filters');
   const mapLayerDensity = document.getElementById('map-layer-density');
   const mapLayerPoints = document.getElementById('map-layer-points');
-  const storyList = document.getElementById('story-list');
+  const summaryTotal = document.getElementById('summary-total');
+  const summaryTopType = document.getElementById('summary-top-type');
+  const summaryAgency = document.getElementById('summary-agency');
+  const summaryStatus = document.getElementById('summary-status');
   const themeColorMeta = document.getElementById('theme-color-meta');
   const suggestionList = document.getElementById('search-suggestions');
 
   const state = {
-    window: '24h',
+    window: '6h',
     search: '',
     status: '',
     callType: '',
@@ -49,6 +50,7 @@
     tagFilter: [],
     calls: [],
     stats: null,
+    lastSixHourStats: null,
     selected: null,
     wavesurfer: null,
     segments: [],
@@ -117,6 +119,35 @@
     state.window = next;
     windowButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.window === next));
     fetchCalls();
+    if (next === '6h') {
+      fetchSixHourStats();
+    }
+  }
+
+  function windowHours() {
+    switch (state.window) {
+      case '6h':
+        return 6;
+      case '7d':
+        return 7 * 24;
+      case '30d':
+        return 30 * 24;
+      default:
+        return 24;
+    }
+  }
+
+  function windowLabel() {
+    switch (state.window) {
+      case '6h':
+        return 'the last 6 hours';
+      case '7d':
+        return 'the last 7 days';
+      case '30d':
+        return 'the last 30 days';
+      default:
+        return 'the last 24 hours';
+    }
   }
 
   function stopPolling() {
@@ -524,24 +555,14 @@
     focusMapOnCall(call);
   }
 
-  function callsWithinMinutes(calls, minutes) {
-    if (!Number.isFinite(minutes) || minutes <= 0) return [];
-    const cutoff = Date.now() - minutes * 60 * 1000;
-    return calls.filter((call) => {
-      const tsValue = call.call_timestamp || call.created_at || call.updated_at;
-      if (!tsValue) return false;
-      const ts = new Date(tsValue).getTime();
-      return Number.isFinite(ts) && ts >= cutoff;
-    });
-  }
-
   function isRecentCompleted(call) {
     if (!call || call.status !== 'done') return false;
     if (call.duplicate_of) return false;
     const tsValue = call.call_timestamp || call.created_at || call.updated_at;
     const ts = tsValue ? new Date(tsValue).getTime() : 0;
     if (!Number.isFinite(ts)) return false;
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const hours = windowHours();
+    const cutoff = Date.now() - hours * 60 * 60 * 1000;
     return ts >= cutoff;
   }
 
@@ -737,7 +758,7 @@
     if (!points.length) {
       state.mapGeoJSON = { type: 'FeatureCollection', features: [] };
       resetMapView();
-      setMapOverlay('No mappable locations', 'No completed calls with mapped locations in the last 24 hours.');
+      setMapOverlay('No mappable locations', `No completed calls with mapped locations in ${windowLabel()}.`);
       refreshMapLayers();
       scheduleMapResize();
       return;
@@ -791,89 +812,51 @@
 
   function applyStats() {
     renderMap();
-    renderStories();
+    renderSummaryBar();
   }
 
-  function renderStories() {
-    if (!storyList) return;
-    storyList.innerHTML = '';
-    const insightCalls = getInsightCalls(getVisibleCalls());
-    const items = [];
-    const formatLabel = (value) => {
-      if (!value) return '';
-      return value
-        .replace(/[_-]+/g, ' ')
-        .split(/\s+/)
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(' ');
-    };
+  function formatTopLabel(value) {
+    if (!value) return '';
+    return value
+      .replace(/[_-]+/g, ' ')
+      .split(/\s+/)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+  }
 
-    const totalCompleted = state.stats?.total || insightCalls.length;
-    if (totalCompleted) {
-      const perHour = (totalCompleted / 24).toFixed(1);
-      items.push({
-        emoji: '🚨',
-        text: `${totalCompleted} completed incident${totalCompleted === 1 ? '' : 's'} in the last 24 hours (~${perHour} per hour).`,
-      });
-    }
+  function normalizeTopEntry(entry) {
+    if (!entry) return null;
+    return { label: entry.tag || entry.Tag || entry.label, count: entry.count || entry.Count || entry.value };
+  }
 
-    const callTypeEntries = Object.entries(state.stats?.call_type_counts || {}).sort((a, b) => b[1] - a[1]);
-    if (callTypeEntries.length) {
-      const [primaryType, primaryCount] = callTypeEntries[0];
-      const [, secondaryCount] = callTypeEntries[1] || [];
-      const secondaryLabel = callTypeEntries[1] ? `${formatLabel(callTypeEntries[1][0])} (${secondaryCount})` : null;
-      const topCallTypeText = secondaryLabel
-        ? `Top incident type: ${formatLabel(primaryType)} (${primaryCount}); next: ${secondaryLabel}.`
-        : `Top incident type: ${formatLabel(primaryType)} (${primaryCount}).`;
-      items.push({ emoji: '🚒', text: topCallTypeText });
-    }
+  function topEntryFromMap(obj) {
+    const pairs = Object.entries(obj || {}).sort((a, b) => Number(b[1]) - Number(a[1]));
+    if (!pairs.length) return null;
+    const [label, count] = pairs[0];
+    return { label, count: Number(count) };
+  }
 
-    const topTown = Object.entries(state.stats?.town_counts || {}).sort((a, b) => b[1] - a[1])[0];
-    const topAgency = Object.entries(state.stats?.agency_counts || {}).sort((a, b) => b[1] - a[1])[0];
-    if (topTown) {
-      items.push({
-        emoji: '🧭',
-        text: `${formatLabel(topTown[0])} has the most logged incidents (${topTown[1]}) in the last 24 hours.`,
-      });
-    } else if (topAgency) {
-      items.push({
-        emoji: '🏢',
-        text: `${formatLabel(topAgency[0])} is handling the most calls (${topAgency[1]}) this 24-hour window.`,
-      });
-    }
+  function renderSummaryBar() {
+    if (!summaryTotal || !summaryTopType || !summaryAgency || !summaryStatus) return;
+    const stats = state.lastSixHourStats;
+    const fallbackStats = state.stats;
+    const total = stats?.total_incidents ?? fallbackStats?.total;
+    summaryTotal.textContent = total !== undefined ? Number(total || 0).toLocaleString() : '—';
 
-    const pastHour = callsWithinMinutes(insightCalls, 60).length;
-    if (pastHour) {
-      items.push({ emoji: '⏱️', text: `${pastHour} incident${pastHour === 1 ? '' : 's'} started in the past hour.` });
-    }
+    const typeEntry =
+      normalizeTopEntry((stats?.top_incident_types || [])[0]) ||
+      topEntryFromMap(stats?.by_type) ||
+      topEntryFromMap(fallbackStats?.call_type_counts);
+    summaryTopType.textContent = typeEntry ? `${formatTopLabel(typeEntry.label)} (${typeEntry.count})` : '—';
 
-    const recent = insightCalls[0];
-    if (recent) {
-      items.push({
-        emoji: '🛰️',
-        text: `Latest call: ${callSummary(recent)} at ${formatDate(recent.call_timestamp)}.`,
-      });
-    }
+    const agencyEntry =
+      normalizeTopEntry((stats?.top_agencies || [])[0]) || topEntryFromMap(stats?.by_agency) || topEntryFromMap(fallbackStats?.agency_counts);
+    summaryAgency.textContent = agencyEntry ? `${formatTopLabel(agencyEntry.label)} (${agencyEntry.count})` : '—';
 
-    if (!items.length) {
-      const li = document.createElement('li');
-      li.className = 'muted';
-      li.textContent = 'Insights appear once calls load.';
-      storyList.appendChild(li);
-      return;
-    }
-
-    items.slice(0, 5).forEach((item) => {
-      const li = document.createElement('li');
-      const dot = document.createElement('span');
-      dot.className = 'dot';
-      dot.textContent = item.emoji;
-      const copy = document.createElement('span');
-      copy.textContent = item.text;
-      li.appendChild(dot);
-      li.appendChild(copy);
-      storyList.appendChild(li);
-    });
+    const statusCounts = stats?.by_status || fallbackStats?.status_counts || {};
+    const queued = Number(statusCounts.queued || 0) + Number(statusCounts.processing || 0);
+    const completed = Number(statusCounts.done || 0);
+    summaryStatus.textContent = stats || fallbackStats ? `${queued} in queue / ${completed} done` : '—';
   }
 
   function renderTagFilterOptions() {
@@ -974,6 +957,21 @@
     }
   }
 
+  async function fetchSixHourStats() {
+    try {
+      const res = await fetch('/api/stats/last6h');
+      if (!res.ok) {
+        throw new Error('failed to load six-hour stats');
+      }
+      const payload = await res.json();
+      state.lastSixHourStats = payload || null;
+      state.mapboxToken = payload?.mapbox_token || state.mapboxToken;
+      renderSummaryBar();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   async function refreshSelected(filename) {
     if (!filename) return;
     const res = await fetch(`/api/transcription/${encodeURIComponent(filename)}`);
@@ -1034,7 +1032,10 @@
     state.sort = e.target.value;
     renderList();
   });
-  refreshBtn.addEventListener('click', fetchCalls);
+  refreshBtn.addEventListener('click', () => {
+    fetchCalls();
+    fetchSixHourStats();
+  });
   regenBtn.addEventListener('click', regenerate);
   playBtn.addEventListener('click', () => {
     if (state.wavesurfer) state.wavesurfer.playPause();
@@ -1052,15 +1053,6 @@
     updateTranscriptHighlight(currentTime);
   });
   windowButtons.forEach((btn) => btn.addEventListener('click', () => setWindow(btn.dataset.window)));
-
-  toggleInsightsBtn.addEventListener('click', () => {
-    const collapsed = insightsBody.classList.toggle('collapsed');
-    toggleInsightsBtn.textContent = collapsed ? 'Expand' : 'Collapse';
-    if (!collapsed) {
-      scheduleMapResize();
-      setTimeout(scheduleMapResize, 250);
-    }
-  });
 
   if (themeToggle) {
     themeToggle.addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
@@ -1096,5 +1088,6 @@
   bindSuggestions();
   initializeTheme();
   syncMapLayerButtons();
+  fetchSixHourStats();
   fetchCalls();
 })();
