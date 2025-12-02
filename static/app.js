@@ -27,8 +27,6 @@
   const filterChips = document.getElementById('filter-chips');
   const toggleInsightsBtn = document.getElementById('toggle-insights');
   const insightsBody = document.getElementById('insights-body');
-  const previewImage = document.getElementById('preview-image');
-  const previewLink = document.getElementById('preview-link');
   const themeToggle = document.getElementById('theme-toggle');
   const toggleAdvancedBtn = document.getElementById('toggle-advanced');
   const advancedFilters = document.getElementById('advanced-filters');
@@ -55,10 +53,10 @@
     theme: 'dark',
     mapLayerVisibility: { density: true, points: false },
     mapGeoJSON: { type: 'FeatureCollection', features: [] },
-    geocodeCache: new Map(),
     pollTimer: null,
     inlineAudio: null,
     mapResizeTimer: null,
+    activePopup: null,
   };
 
   const MAP_DEFAULT_CENTER = [-74.696, 41.05];
@@ -139,6 +137,29 @@
     return unique;
   }
 
+  function escapeHTML(text) {
+    const div = document.createElement('div');
+    div.textContent = text || '';
+    return div.innerHTML;
+  }
+
+  function callLocationLabel(call) {
+    if (call.location && call.location.label) return call.location.label;
+    if (call.town) return call.town;
+    if (call.agency) return call.agency;
+    return 'Location pending';
+  }
+
+  function narrativeSnippet(call) {
+    const text =
+      call.normalized_transcript ||
+      call.clean_transcript_text ||
+      call.transcript_text ||
+      call.raw_transcript_text ||
+      '';
+    return text.trim();
+  }
+
   function formatDate(value) {
     if (!value) return '—';
     const dt = new Date(value);
@@ -210,21 +231,27 @@
     card.tabIndex = 0;
     card.setAttribute('role', 'listitem');
     const title = callSummary(call);
-    const subtitle = call.pretty_title || call.filename;
+    const locationLabel = callLocationLabel(call);
+    const snippet = narrativeSnippet(call) || 'Transcript pending.';
+    const snippetSafe = escapeHTML(snippet);
+    const expanded = state.selected && state.selected.filename === call.filename;
+    const fullText = escapeHTML(snippet);
     card.innerHTML = `
       <div class="card-top">
         <div>
-          <div class="title">${title}</div>
-          <div class="meta">${formatDate(call.call_timestamp)} • ${subtitle}</div>
+          <div class="title">${escapeHTML(title)}</div>
+          <div class="meta">${formatDate(call.call_timestamp)} • ${escapeHTML(locationLabel)}</div>
         </div>
         <span class="status-icon ${call.status}" aria-label="${call.status}">${statusIcon(call.status)}</span>
       </div>
+      <div class="call-snippet" title="${snippetSafe}">${snippetSafe}</div>
       <div class="card-footer">
         <span class="badge ${call.status}">${call.status}</span>
         <div class="quick-actions">
           ${call.audio_url ? '<button type="button" class="mini inline-audio">▶ Preview</button>' : '<span class="muted">No audio</span>'}
         </div>
       </div>
+      ${expanded ? `<div class="call-expanded" title="${fullText}">${fullText}</div>` : ''}
     `;
     card.addEventListener('click', () => selectCall(call));
     card.addEventListener('keydown', (evt) => {
@@ -437,7 +464,6 @@
     updatedAtEl.textContent = `Updated ${formatDate(call.updated_at)}`;
     renderTags(detailTags, call.tags || []);
     renderTranscript(call);
-    renderPreview(call);
     if (call.audio_url) {
       playBtn.disabled = true;
       createWave(call.audio_url);
@@ -456,32 +482,10 @@
     scheduleStatusPolling(call);
   }
 
-  function renderPreview(call) {
-    if (!previewImage || !previewLink) return;
-    previewImage.onerror = () => {
-      previewImage.classList.add('hidden');
-      previewImage.removeAttribute('src');
-      previewLink.classList.add('hidden');
-      previewLink.removeAttribute('href');
-    };
-    if (call.preview_image) {
-      const cacheBuster = ['processing', 'queued'].includes(call.status) ? `?t=${Date.now()}` : '';
-      previewImage.src = `${call.preview_image}${cacheBuster}`;
-      previewImage.alt = `Preview for ${call.pretty_title || call.filename}`;
-      previewImage.classList.remove('hidden');
-      previewLink.href = call.preview_image;
-      previewLink.classList.remove('hidden');
-    } else {
-      previewImage.classList.add('hidden');
-      previewImage.removeAttribute('src');
-      previewLink.classList.add('hidden');
-      previewLink.removeAttribute('href');
-    }
-  }
-
   async function selectCall(call) {
     renderDetail(call);
     await refreshSelected(call.filename);
+    focusMapOnCall(call);
   }
 
   function callsWithinMinutes(calls, minutes) {
@@ -518,47 +522,6 @@
       return { lat: Number(call.location.latitude), lon: Number(call.location.longitude) };
     }
     return null;
-  }
-
-  function buildGeocodeQuery(call) {
-    const locationLabel = (call.location && call.location.label) || '';
-    if (typeof locationLabel === 'string' && locationLabel.trim()) {
-      return locationLabel.trim();
-    }
-    const town = (call.town || '').trim();
-    if (town) return `${town}, NJ`;
-    const agency = (call.agency || '').trim();
-    if (agency) return `${agency}, Sussex County, NJ`;
-    const fallback = (call.pretty_title || call.filename || '').replace(/_/g, ' ').trim();
-    if (fallback) return `${fallback}, Sussex County, NJ`;
-    return '';
-  }
-
-  async function geocodeQuery(query, token, warnState) {
-    if (!query || !token) return null;
-    if (state.geocodeCache.has(query)) return state.geocodeCache.get(query);
-    const encoded = encodeURIComponent(query);
-    const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json?access_token=${token}&limit=1`;
-    try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const coords = data?.features?.[0]?.center;
-      if (Array.isArray(coords) && Number.isFinite(coords[0]) && Number.isFinite(coords[1])) {
-        const resolved = { lon: coords[0], lat: coords[1] };
-        state.geocodeCache.set(query, resolved);
-        return resolved;
-      }
-      state.geocodeCache.set(query, null);
-      return null;
-    } catch (err) {
-      if (!warnState.logged) {
-        console.warn('Mapbox geocoding failed', err);
-        warnState.logged = true;
-      }
-      state.geocodeCache.set(query, null);
-      return null;
-    }
   }
 
   function destroyMapInstance() {
@@ -615,7 +578,7 @@
         geometry: { type: 'Point', coordinates: [point.lon, point.lat] },
         properties: {
           title: callSummary(point.call),
-          subtitle: point.call.town || point.call.agency || 'Unknown area',
+          subtitle: callLocationLabel(point.call),
           timestamp: formatDate(point.call.call_timestamp),
           weight: Math.max(0.3, Math.min(1, (point.call.duration_seconds || 60) / 600)),
         },
@@ -672,9 +635,9 @@
         const coordinates = feature.geometry.coordinates.slice();
         const html = `
           <div>
-            <strong>${feature.properties.title}</strong>
-            <div class="muted">${feature.properties.timestamp}</div>
-            <div class="muted">${feature.properties.subtitle}</div>
+            <strong>${escapeHTML(feature.properties.title)}</strong>
+            <div class="muted">${escapeHTML(feature.properties.timestamp)}</div>
+            <div class="muted">${escapeHTML(feature.properties.subtitle)}</div>
           </div>`;
         new mapboxgl.Popup({ offset: 12 }).setLngLat(coordinates).setHTML(html).addTo(state.map);
       });
@@ -711,16 +674,26 @@
     refreshMapLayers();
   }
 
-  async function updateMapMarkers(calls, token) {
+  function focusMapOnCall(call) {
     if (!state.map) return;
-    const warnState = { logged: false };
+    const coords = extractCoordinates(call);
+    if (!hasValidCoordinates(coords)) return;
+    state.map.flyTo({ center: [coords.lon, coords.lat], zoom: 12, essential: true });
+    const html = `
+      <div>
+        <strong>${escapeHTML(callSummary(call))}</strong>
+        <div class="muted">${formatDate(call.call_timestamp)}</div>
+        <div class="muted">${escapeHTML(callLocationLabel(call))}</div>
+      </div>`;
+    if (state.activePopup) state.activePopup.remove();
+    state.activePopup = new mapboxgl.Popup({ offset: 12 }).setLngLat([coords.lon, coords.lat]).setHTML(html).addTo(state.map);
+  }
+
+  async function updateMapMarkers(calls) {
+    if (!state.map) return;
     const points = [];
     for (const call of calls) {
-      let coords = extractCoordinates(call);
-      if (!coords) {
-        const query = buildGeocodeQuery(call);
-        coords = await geocodeQuery(query, token, warnState);
-      }
+      const coords = extractCoordinates(call);
       if (!hasValidCoordinates(coords)) continue;
       points.push({ call, ...coords });
     }
@@ -772,11 +745,11 @@
       state.map.addControl(new mapboxgl.ScaleControl({ maxWidth: 120, unit: 'imperial' }), 'bottom-right');
       state.map.on('load', () => {
         ensureMapSource();
-        updateMapMarkers(callsForMap, token);
+        updateMapMarkers(callsForMap);
         scheduleMapResize();
       });
     } else {
-      updateMapMarkers(callsForMap, token);
+      updateMapMarkers(callsForMap);
     }
   }
 
