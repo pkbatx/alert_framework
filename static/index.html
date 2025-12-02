@@ -13,13 +13,12 @@
 </head>
 <body data-theme="dark">
   <div class="app">
-    <header class="page-header">
-      <div>
-        <p class="eyebrow">Sussex County Alerts</p>
-        <h1>Unified Call Monitor</h1>
-        <p class="muted">Live queue-driven alerts with on-demand transcripts, waveform playback, and quick insights.</p>
+    <div class="top-nav">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">●</span>
+        <span class="brand-name">Sussex County Alerts</span>
       </div>
-      <div class="header-actions">
+      <div class="nav-actions">
         <div class="window-switcher" role="group" aria-label="Time window">
           <button data-window="24h" class="active">Last 24h</button>
           <button data-window="7d">Last 7d</button>
@@ -27,46 +26,52 @@
         </div>
         <button id="theme-toggle" class="ghost" type="button" aria-label="Toggle theme">🌙 Dark</button>
       </div>
-    </header>
+    </div>
 
-    <section class="media-hero">
-      <div class="video-container">
-        <video
-          id="alert-overview"
-          controls
-          preload="metadata"
-          poster="https://storage.googleapis.com/coverr-public/videos/coverr-alert-bridge/poster.jpg"
-          aria-label="Overview of Sussex County alert workflow"
-        >
-          <source src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4" type="video/mp4" />
-          Your browser does not support the video tag.
-        </video>
+    <section class="hero">
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">Unified Call Monitor</p>
+          <h1>Stay ahead of every call in one clean view</h1>
+          <p class="muted">Live queue-driven alerts with on-demand transcripts, map awareness, and audio you can scan without losing your place.</p>
+          <div class="hero-actions">
+            <button class="primary" type="button" aria-label="Open the recent calls list">View latest calls</button>
+            <button class="ghost" type="button" aria-label="Learn about the workflow">See how it works</button>
+          </div>
+        </div>
+        <div class="hero-visual" aria-hidden="true">
+          <div class="hero-visual-inner">
+            <p class="eyebrow">Realtime status</p>
+            <h3>Queue + transcript health</h3>
+            <ul>
+              <li><strong>24h</strong> snapshot with quick filters</li>
+              <li>Waveform playback inline</li>
+              <li>Regenerate transcripts anytime</li>
+            </ul>
+          </div>
+        </div>
       </div>
+    </section>
 
-      <div class="card-grid" role="list">
-        <article class="card" role="listitem">
-          <h3 class="card-title">Live queue monitoring</h3>
-          <p class="card-summary">Track the last 24h, 7d, or 30d windows with status-aware filters for every call.</p>
-          <div class="card-actions">
-            <button class="primary" type="button" aria-label="Open the recent calls list">Open calls</button>
-            <button class="secondary" type="button" aria-label="View filtering controls">View filters</button>
-          </div>
+    <section class="feature-section" aria-label="Feature highlights">
+      <div class="feature-grid" role="list">
+        <article class="feature" role="listitem">
+          <div class="feature-icon" aria-hidden="true">📡</div>
+          <h3>Live queue monitoring</h3>
+          <p>Track the last 24h, 7d, or 30d with status-aware filters for every call.</p>
+          <button class="text-button" type="button" aria-label="Open the recent calls list">Open calls</button>
         </article>
-        <article class="card" role="listitem">
-          <h3 class="card-title">Transcript accuracy</h3>
-          <p class="card-summary">Regenerate transcripts, scan timestamps, and listen without losing your place.</p>
-          <div class="card-actions">
-            <button class="primary" type="button" aria-label="Jump to transcript tools">Review transcript</button>
-            <button class="secondary" type="button" aria-label="Learn about regeneration">How it works</button>
-          </div>
+        <article class="feature" role="listitem">
+          <div class="feature-icon" aria-hidden="true">🗒️</div>
+          <h3>Transcript accuracy</h3>
+          <p>Regenerate transcripts, scan timestamps, and listen without losing your place.</p>
+          <button class="text-button" type="button" aria-label="Jump to transcript tools">Review transcript</button>
         </article>
-        <article class="card" role="listitem">
-          <h3 class="card-title">Map awareness</h3>
-          <p class="card-summary">Switch between density and point layers to spot activity clusters across towns.</p>
-          <div class="card-actions">
-            <button class="primary" type="button" aria-label="Open the map view">Open map</button>
-            <button class="secondary" type="button" aria-label="See map layer tips">Layer tips</button>
-          </div>
+        <article class="feature" role="listitem">
+          <div class="feature-icon" aria-hidden="true">🗺️</div>
+          <h3>Map awareness</h3>
+          <p>Switch between density and point layers to spot activity clusters across towns.</p>
+          <button class="text-button" type="button" aria-label="Open the map view">Open map</button>
         </article>
       </div>
     </section>
