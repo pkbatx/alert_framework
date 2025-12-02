@@ -36,6 +36,8 @@
 body {
   margin: 0;
   font-family: "Inter", system-ui, -apple-system, sans-serif;
+  font-size: clamp(14px, 1vw + 0.5rem, 18px);
+  line-height: 1.5;
   background: radial-gradient(circle at 18% 20%, rgba(124, 231, 255, 0.09), transparent 28%),
     radial-gradient(circle at 78% 8%, rgba(167, 139, 250, 0.14), transparent 24%),
     radial-gradient(circle at 50% 60%, rgba(94, 245, 164, 0.08), transparent 35%),
@@ -74,7 +76,11 @@ body {
   margin: 0 0 6px;
 }
 
-h1 { margin: 0 0 6px; font-size: 32px; }
+h1 {
+  margin: 0 0 6px;
+  font-size: clamp(1.8rem, 2vw + 1rem, 2.4rem);
+  font-weight: 700;
+}
 h2 { margin: 0; }
 p { margin: 0; }
 
@@ -165,6 +171,18 @@ p { margin: 0; }
   transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
 }
 
+.button:focus-visible,
+button:focus-visible,
+.ghost:focus-visible,
+a:focus-visible,
+.chip:focus-visible,
+.tag:focus-visible,
+.call-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px rgba(124, 231, 255, 0.2);
+}
+
 .button:hover, button:hover, .ghost:hover { transform: translateY(-1px); border-color: var(--accent); box-shadow: 0 12px 30px rgba(124, 231, 255, 0.12); }
 .ghost.active { border-color: var(--accent); color: var(--accent); box-shadow: 0 12px 30px rgba(124, 231, 255, 0.14); }
 
@@ -173,6 +191,96 @@ button.primary { background: linear-gradient(135deg, var(--accent), var(--accent
 button:disabled { opacity: 0.6; cursor: not-allowed; box-shadow: none; }
 
 .layout { display: flex; flex-direction: column; gap: 16px; }
+
+.media-hero {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  margin: 20px 0 12px;
+}
+
+@media (min-width: 960px) {
+  .media-hero {
+    grid-template-columns: 1.6fr 1fr;
+    align-items: start;
+  }
+}
+
+.video-container {
+  position: relative;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+}
+.video-container video,
+.video-container iframe {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  max-height: 40vh;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  box-shadow: var(--surface-glow);
+}
+@media (min-width: 768px) {
+  .video-container {
+    max-height: 60vh;
+  }
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1rem;
+  margin-top: 2rem;
+}
+.card {
+  background-color: #fff;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 200px;
+  color: #0f172a;
+}
+.card-title {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+.card-summary {
+  flex-grow: 1;
+  font-size: 0.9rem;
+  color: #444;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.card-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+}
+.card-actions .primary {
+  background-color: #004285;
+  color: #fff;
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.card-actions .secondary {
+  background: none;
+  color: #004285;
+  border: none;
+  text-decoration: underline;
+  padding: 0.5rem;
+  cursor: pointer;
+}
 
 .map-list {
   display: grid;
@@ -263,7 +371,15 @@ button:disabled { opacity: 0.6; cursor: not-allowed; box-shadow: none; }
 .player-actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
 
 .tags { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-.tag { border: 1px solid var(--border); padding: 6px 10px; border-radius: 10px; color: var(--muted); cursor: pointer; background: rgba(124, 231, 255, 0.05); }
+.tag {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  border-radius: 10px;
+  color: var(--muted);
+  cursor: pointer;
+  background: rgba(124, 231, 255, 0.05);
+  font: inherit;
+}
 .tag.active { color: var(--accent); border-color: var(--accent); box-shadow: 0 6px 20px rgba(124, 231, 255, 0.18); }
 
 .transcript { background: #0c1328; border: 1px solid var(--border); border-radius: 12px; padding: 12px; min-height: 160px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); }
