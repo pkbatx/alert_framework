@@ -10,6 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"io"
 	"log"
 	"math"
@@ -33,6 +37,9 @@ import (
 	"alert_framework/metrics"
 	"alert_framework/queue"
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 	_ "modernc.org/sqlite"
 )
 
@@ -180,6 +187,7 @@ type transcriptionResponse struct {
 	Town                 string              `json:"town,omitempty"`
 	Agency               string              `json:"agency,omitempty"`
 	AudioURL             string              `json:"audio_url,omitempty"`
+	PreviewImage         string              `json:"preview_image,omitempty"`
 	Tags                 []string            `json:"tags,omitempty"`
 	Segments             []transcriptSegment `json:"segments,omitempty"`
 	Location             *locationGuess      `json:"location,omitempty"`
@@ -334,6 +342,7 @@ func main() {
 	mux.HandleFunc("/api/transcription/", s.handleTranscription)
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/preview/", s.handlePreview)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/debug/queue", s.handleDebugQueue)
@@ -720,6 +729,10 @@ func (s *server) buildJobContext(filename string) (formatting.CallMetadata, stri
 
 func (s *server) publicURL(filename string) string {
 	return fmt.Sprintf("https://ui.sussexcountyalerts.com/%s", url.PathEscape(filename))
+}
+
+func (s *server) previewURL(filename string) string {
+	return fmt.Sprintf("https://ui.sussexcountyalerts.com/preview/%s.png", url.PathEscape(filename))
 }
 
 func (s *server) processFile(ctx context.Context, j processJob) error {
@@ -1407,6 +1420,162 @@ func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Printf("failed to write debug queue response: %v", err)
 	}
+}
+
+func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	requested := strings.TrimPrefix(r.URL.Path, "/preview/")
+	requested = strings.TrimSuffix(requested, ".png")
+	requested = filepath.Base(requested)
+	if requested == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	t, err := s.getTranscription(requested)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	img, err := s.renderPreviewImage(*t)
+	if err != nil {
+		log.Printf("preview render failed for %s: %v", requested, err)
+		http.Error(w, "preview unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	if err := png.Encode(w, img); err != nil {
+		log.Printf("preview encode failed for %s: %v", requested, err)
+	}
+}
+
+func (s *server) renderPreviewImage(t transcription) (image.Image, error) {
+	const (
+		width      = 1200
+		height     = 630
+		padding    = 48
+		textWidth  = width - (padding * 2)
+		lineHeight = 22
+	)
+
+	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
+	bg := image.NewUniform(color.RGBA{R: 11, G: 16, B: 33, A: 255})
+	panel := image.NewUniform(color.RGBA{R: 18, G: 27, B: 56, A: 255})
+	accent := image.NewUniform(color.RGBA{R: 126, G: 231, B: 255, A: 255})
+	muted := image.NewUniform(color.RGBA{R: 165, G: 175, B: 197, A: 255})
+	text := image.NewUniform(color.RGBA{R: 232, G: 238, B: 255, A: 255})
+	warning := image.NewUniform(color.RGBA{R: 255, G: 209, B: 102, A: 255})
+
+	draw.Draw(canvas, canvas.Bounds(), bg, image.Point{}, draw.Src)
+	draw.Draw(canvas, image.Rect(padding/2, padding/2, width-padding/2, height-padding/2), panel, image.Point{}, draw.Src)
+	draw.Draw(canvas, image.Rect(padding, padding, width-padding, padding+6), accent, image.Point{}, draw.Src)
+
+	meta, err := formatting.ParseCallMetadataFromFilename(t.Filename, s.tz)
+	if err != nil {
+		meta = formatting.CallMetadata{RawFileName: t.Filename, DateTime: t.CreatedAt.In(s.tz)}
+	}
+	callTime := meta.DateTime
+	if t.CallTimestamp != nil {
+		callTime = t.CallTimestamp.In(s.tz)
+	}
+	if callTime.IsZero() {
+		callTime = t.CreatedAt.In(s.tz)
+	}
+	if meta.CallType == "" && t.CallType != nil {
+		meta.CallType = *t.CallType
+	}
+	if meta.TownDisplay == "" {
+		meta.TownDisplay = meta.AgencyDisplay
+	}
+
+	title := formatting.FormatPrettyTitle(t.Filename, callTime, s.tz)
+	callType := strings.ToUpper(fallbackEmpty(meta.CallType, "CALL"))
+	sublineParts := []string{callTime.In(s.tz).Format("Jan 2, 2006 • 3:04 PM MST")}
+	if meta.TownDisplay != "" {
+		sublineParts = append(sublineParts, meta.TownDisplay)
+	}
+	statusLine := fmt.Sprintf("Status: %s", strings.Title(t.Status))
+
+	snippet := "Transcript not ready yet — this preview will fill in automatically once processing finishes."
+	if txt := pickTranscript(&t); txt != nil && strings.TrimSpace(*txt) != "" {
+		snippet = truncateText(normalizeWhitespace(*txt), 420)
+	}
+
+	face := basicfont.Face7x13
+	mutedY := drawLines(canvas, padding, padding+40, lineHeight, wrapLines("Sussex County Alerts", textWidth, face), muted, face)
+	titleY := drawLines(canvas, padding, mutedY+8, lineHeight+4, wrapLines(title, textWidth, face), text, face)
+	subY := drawLines(canvas, padding, titleY+6, lineHeight, wrapLines(strings.Join(sublineParts, " • "), textWidth, face), muted, face)
+	drawLines(canvas, padding, subY+6, lineHeight, wrapLines(statusLine, textWidth, face), warning, face)
+
+	captionY := subY + 40
+	draw.Draw(canvas, image.Rect(padding, captionY-8, width-padding, captionY-4), accent, image.Point{}, draw.Src)
+	drawLines(canvas, padding, captionY+12, lineHeight, wrapLines(callType+" preview", textWidth, face), text, face)
+
+	drawLines(canvas, padding, captionY+34, lineHeight, wrapLines(snippet, textWidth, face), text, face)
+
+	return canvas, nil
+}
+
+func drawLines(dst draw.Image, x, startY, lineHeight int, lines []string, colorSrc image.Image, face font.Face) int {
+	d := &font.Drawer{Dst: dst, Src: colorSrc, Face: face}
+	y := startY
+	for _, line := range lines {
+		d.Dot = fixed.P(x, y)
+		d.DrawString(line)
+		y += lineHeight
+	}
+	return y
+}
+
+func wrapLines(text string, maxWidth int, face font.Face) []string {
+	var lines []string
+	var current strings.Builder
+	d := &font.Drawer{Face: face}
+
+	for _, word := range strings.Fields(text) {
+		candidate := word
+		if current.Len() > 0 {
+			candidate = current.String() + " " + word
+		}
+		d.Dot = fixed.Point26_6{}
+		if d.MeasureString(candidate).Ceil() > maxWidth && current.Len() > 0 {
+			lines = append(lines, current.String())
+			current.Reset()
+			current.WriteString(word)
+			continue
+		}
+		if current.Len() > 0 {
+			current.WriteString(" ")
+		}
+		current.WriteString(word)
+	}
+
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	return lines
+}
+
+func normalizeWhitespace(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func truncateText(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
 }
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -2162,6 +2331,7 @@ func (s *server) toResponse(t transcription) transcriptionResponse {
 		Town:                 meta.TownDisplay,
 		Agency:               meta.AgencyDisplay,
 		AudioURL:             s.publicURL(t.Filename),
+		PreviewImage:         s.previewURL(t.Filename),
 		Tags:                 tags,
 		Segments:             s.buildSegments(t),
 		Location:             location,
@@ -2620,6 +2790,7 @@ func (s *server) fireWebhooks(j processJob) error {
 		"local_datetime": alertTime.In(s.tz).Format("2006-01-02 15:04:05"),
 		"filename":       t.Filename,
 		"url":            j.publicURL,
+		"preview_image":  s.previewURL(t.Filename),
 		"pretty_title":   j.prettyTitle,
 		"alert_message":  formatting.BuildAlertMessage(j.meta, j.prettyTitle, j.publicURL),
 		"metadata": map[string]interface{}{

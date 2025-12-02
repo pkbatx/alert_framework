@@ -1,9 +1,10 @@
 module alert_framework
 
-go 1.22
+go 1.24.0
 
 require (
 	github.com/fsnotify/fsnotify v1.7.0
+	golang.org/x/image v0.33.0
 	modernc.org/sqlite v1.27.0
 )
 
