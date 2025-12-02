@@ -62,6 +62,29 @@ func TestParseCallMetadataWithExtraTokens(t *testing.T) {
 	}
 }
 
+func TestParseCallMetadataWithProcessedSuffix(t *testing.T) {
+	loc, err := time.LoadLocation("EST5EDT")
+	if err != nil {
+		t.Fatalf("failed to load location: %v", err)
+	}
+
+	meta, err := ParseCallMetadataFromFilename("Stanhope_FD_2025_12_02_15_45_30_proc.mp3", loc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.AgencyDisplay != "Stanhope" {
+		t.Fatalf("unexpected agency display: %s", meta.AgencyDisplay)
+	}
+	if meta.CallType != "FD" {
+		t.Fatalf("unexpected call type: %s", meta.CallType)
+	}
+
+	expectedTime := time.Date(2025, time.December, 2, 15, 45, 30, 0, loc)
+	if !meta.DateTime.Equal(expectedTime) {
+		t.Fatalf("unexpected datetime: %v", meta.DateTime)
+	}
+}
+
 func TestParseCallMetadataWithEmptySegments(t *testing.T) {
 	loc, err := time.LoadLocation("EST5EDT")
 	if err != nil {

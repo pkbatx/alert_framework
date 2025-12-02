@@ -900,8 +900,15 @@ func ProcessAudioWithFFmpeg(ctx context.Context, rawPath string) (string, error)
 	processedName := base + "_proc" + ext
 	processedPath := filepath.Join(filepath.Dir(rawPath), processedName)
 
-	filterChain := "highpass=f=200,lowpass=f=3600,anequalizer=f=60:t=o:w=10:g=-25,anequalizer=f=120:t=o:w=10:g=-20,anequalizer=f=180:t=o:w=10:g=-15,afftdn=nr=10:nf=-30,acompressor=threshold=-20dB:ratio=3:attack=5:release=200,alimiter=limit=-2dB"
-	args := []string{"-y", "-i", rawPath, "-ac", "1", "-ar", "16000", "-af", filterChain, processedPath}
+	filter := "highpass=f=200,lowpass=f=3600,afftdn=nf=-25,acompressor=threshold=-20dB:ratio=3:attack=5:release=200,alimiter=limit=-2dB"
+	args := []string{
+		"-y",
+		"-i", rawPath,
+		"-ac", "1",
+		"-ar", "16000",
+		"-af", filter,
+		processedPath,
+	}
 	cmd := exec.CommandContext(ctx, ffmpegBin, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -2773,7 +2780,7 @@ func (s *server) parseAndGeocodeLocation(ctx context.Context, normalized string,
 		return guess
 	}
 
-	lat, lng, precision, err := formatting.GeocodeParsedLocation(ctx, s.client, formatting.GeocoderConfig{Token: token}, parsed)
+	lat, lng, precision, err := formatting.GeocodeParsedLocation(ctx, s.client, formatting.GeocoderConfig{Token: token, BBox: []float64{sussexMinLng, sussexMinLat, sussexMaxLng, sussexMaxLat}}, parsed)
 	if err != nil {
 		return guess
 	}
@@ -2868,63 +2875,129 @@ func (s *server) buildLocationCandidates(t transcription, meta formatting.CallMe
 	return candidates
 }
 
+func buildGeocodeQuery(raw string) string {
+	q := strings.ReplaceAll(raw, "_", " ")
+	q = strings.ReplaceAll(q, "-", " ")
+	q = strings.TrimSpace(q)
+
+	tokens := strings.Fields(q)
+	filtered := tokens[:0]
+	for _, t := range tokens {
+		upper := strings.ToUpper(t)
+		switch upper {
+		case "FD", "EMS", "FIRE", "RESCUE", "SQUAD", "AMBULANCE", "DEPT", "DEPARTMENT", "FIREHOUSE":
+		// skip service-type tokens
+		default:
+			filtered = append(filtered, t)
+		}
+	}
+	q = strings.Join(filtered, " ")
+
+	if q == "" {
+		q = raw
+	}
+
+	return fmt.Sprintf("%s, Sussex County, New Jersey, USA", strings.TrimSpace(q))
+}
+
+func buildFallbackGeocodeQuery(raw string) string {
+	normalized := strings.ReplaceAll(raw, "_", " ")
+	normalized = strings.ReplaceAll(normalized, "-", " ")
+	normalized = strings.TrimSpace(normalized)
+
+	tokens := strings.Fields(normalized)
+	filtered := tokens[:0]
+	for _, t := range tokens {
+		upper := strings.ToUpper(t)
+		switch upper {
+		case "FD", "EMS", "FIRE", "RESCUE", "SQUAD", "AMBULANCE", "DEPT", "DEPARTMENT", "FIREHOUSE":
+		// skip service-type tokens
+		default:
+			filtered = append(filtered, t)
+		}
+	}
+	normalized = strings.Join(filtered, " ")
+
+	if normalized == "" {
+		normalized = raw
+	}
+
+	return fmt.Sprintf("%s, New Jersey, USA", strings.TrimSpace(normalized))
+}
+
 func (s *server) geocodeWithMapbox(ctx context.Context, token, query string) *locationGuess {
-	encoded := url.PathEscape(query)
-	endpoint := fmt.Sprintf("https://api.mapbox.com/geocoding/v5/mapbox.places/%s.json?access_token=%s&autocomplete=true&limit=1&country=US&language=en&proximity=-74.696,41.05", encoded, token)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		log.Printf("mapbox request build failed: %v", err)
-		return nil
-	}
-	resp, err := s.client.Do(req)
-	if err != nil {
-		log.Printf("mapbox request failed: %v", err)
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("mapbox response %d for %s", resp.StatusCode, query)
-		return nil
+	queries := []string{buildGeocodeQuery(query)}
+	if fallback := buildFallbackGeocodeQuery(query); fallback != "" && fallback != queries[0] {
+		queries = append(queries, fallback)
 	}
 
-	var payload struct {
-		Features []struct {
-			PlaceName string    `json:"place_name"`
-			Center    []float64 `json:"center"`
-			PlaceType []string  `json:"place_type"`
-		} `json:"features"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		log.Printf("mapbox decode failed: %v", err)
-		return nil
-	}
-	if len(payload.Features) == 0 {
-		return nil
-	}
-	feature := payload.Features[0]
-	if len(feature.Center) < 2 {
-		return nil
-	}
-	lat := feature.Center[1]
-	lng := feature.Center[0]
-	if !isWithinSussexCounty(lat, lng) {
-		log.Printf("mapbox result outside Sussex County ignored for %s: %s (%f,%f)", query, feature.PlaceName, lat, lng)
-		return nil
+	for _, search := range queries {
+		search = strings.TrimSpace(search)
+		if search == "" {
+			continue
+		}
+		encoded := url.PathEscape(search)
+		endpoint := fmt.Sprintf(
+			"https://api.mapbox.com/geocoding/v5/mapbox.places/%s.json?access_token=%s&autocomplete=true&limit=1&country=US&language=en&bbox=%f,%f,%f,%f",
+			encoded, token, sussexMinLng, sussexMinLat, sussexMaxLng, sussexMaxLat,
+		)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			log.Printf("mapbox request build failed: %v", err)
+			continue
+		}
+		resp, err := s.client.Do(req)
+		if err != nil {
+			log.Printf("mapbox request failed: %v", err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("mapbox response %d for %s", resp.StatusCode, search)
+			continue
+		}
+
+		var payload struct {
+			Features []struct {
+				PlaceName string    `json:"place_name"`
+				Center    []float64 `json:"center"`
+				PlaceType []string  `json:"place_type"`
+			} `json:"features"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			log.Printf("mapbox decode failed: %v", err)
+			continue
+		}
+		if len(payload.Features) == 0 {
+			continue
+		}
+		feature := payload.Features[0]
+		if len(feature.Center) < 2 {
+			continue
+		}
+		lat := feature.Center[1]
+		lng := feature.Center[0]
+		if !isWithinSussexCounty(lat, lng) {
+			log.Printf("mapbox result outside Sussex County ignored for %s: %s (%f,%f)", search, feature.PlaceName, lat, lng)
+			continue
+		}
+
+		precision := ""
+		if len(feature.PlaceType) > 0 {
+			precision = feature.PlaceType[0]
+		}
+
+		return &locationGuess{
+			Label:     feature.PlaceName,
+			Latitude:  lat,
+			Longitude: lng,
+			Precision: precision,
+			Source:    search,
+		}
 	}
 
-	precision := ""
-	if len(feature.PlaceType) > 0 {
-		precision = feature.PlaceType[0]
-	}
-
-	return &locationGuess{
-		Label:     feature.PlaceName,
-		Latitude:  lat,
-		Longitude: lng,
-		Precision: precision,
-		Source:    query,
-	}
+	return nil
 }
 
 func (s *server) loadSettings() (AppSettings, error) {

@@ -45,36 +45,54 @@ func FormatPrettyTitle(fileName string, now time.Time, loc *time.Location) strin
 func ParseCallMetadataFromFilename(fileName string, loc *time.Location) (CallMetadata, error) {
 	base := filepath.Base(fileName)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
+	if strings.HasSuffix(base, "_proc") {
+		base = strings.TrimSuffix(base, "_proc")
+	}
 
 	// Split on underscores while ignoring empty segments so filenames with
 	// doubled separators (e.g., "EMS__Duty") are handled gracefully.
 	parts := strings.FieldsFunc(base, func(r rune) bool { return r == '_' })
-	if len(parts) < 7 {
-		return CallMetadata{RawFileName: fileName}, fmt.Errorf("filename does not contain enough segments")
+
+	type numericToken struct {
+		value string
+		index int
 	}
 
-	numericParts := parts[len(parts)-6:]
-	year, err := strconv.Atoi(numericParts[0])
+	var numericParts []numericToken
+	for i := len(parts) - 1; i >= 0 && len(numericParts) < 6; i-- {
+		if _, err := strconv.Atoi(parts[i]); err == nil {
+			numericParts = append(numericParts, numericToken{value: parts[i], index: i})
+		}
+	}
+	if len(numericParts) < 6 {
+		return CallMetadata{RawFileName: fileName}, fmt.Errorf("filename does not contain enough timestamp segments")
+	}
+
+	for i, j := 0, len(numericParts)-1; i < j; i, j = i+1, j-1 {
+		numericParts[i], numericParts[j] = numericParts[j], numericParts[i]
+	}
+
+	year, err := strconv.Atoi(numericParts[0].value)
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	month, err := strconv.Atoi(numericParts[1])
+	month, err := strconv.Atoi(numericParts[1].value)
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	day, err := strconv.Atoi(numericParts[2])
+	day, err := strconv.Atoi(numericParts[2].value)
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	hour, err := strconv.Atoi(numericParts[3])
+	hour, err := strconv.Atoi(numericParts[3].value)
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	minute, err := strconv.Atoi(numericParts[4])
+	minute, err := strconv.Atoi(numericParts[4].value)
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
-	second, err := strconv.Atoi(numericParts[5])
+	second, err := strconv.Atoi(numericParts[5].value)
 	if err != nil {
 		return CallMetadata{RawFileName: fileName}, err
 	}
@@ -85,7 +103,10 @@ func ParseCallMetadataFromFilename(fileName string, loc *time.Location) (CallMet
 
 	agencyTown := ""
 	callType := ""
-	descriptive := parts[:len(parts)-6]
+	descriptive := parts
+	if len(numericParts) > 0 {
+		descriptive = parts[:numericParts[0].index]
+	}
 	if len(descriptive) > 0 {
 		if len(descriptive) > 1 {
 			agencyTown = normalizeDisplay(strings.Join(descriptive[:len(descriptive)-1], " "))

@@ -13,6 +13,7 @@ import (
 type GeocoderConfig struct {
 	BaseURL string
 	Token   string
+	BBox    []float64
 }
 
 func (cfg GeocoderConfig) endpoint() string {
@@ -41,6 +42,9 @@ func GeocodeParsedLocation(ctx context.Context, client *http.Client, cfg Geocode
 
 	encoded := url.PathEscape(query)
 	endpoint := fmt.Sprintf("%s%s.json?access_token=%s&limit=1&country=US&language=en", cfg.endpoint(), encoded, token)
+	if len(cfg.BBox) == 4 {
+		endpoint += fmt.Sprintf("&bbox=%f,%f,%f,%f", cfg.BBox[0], cfg.BBox[1], cfg.BBox[2], cfg.BBox[3])
+	}
 	if precision == "intersection" {
 		endpoint += "&types=intersection"
 	} else if precision == "address" {
