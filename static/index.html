@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#080c1c" id="theme-color-meta" />
   <title>Sussex County Alerts</title>
   <link
     href="https://api.mapbox.com/mapbox-gl-js/v3.1.2/mapbox-gl.css"
@@ -10,7 +11,7 @@
   />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body>
+<body data-theme="dark">
   <div class="app">
     <header class="page-header">
       <div>
@@ -18,53 +19,64 @@
         <h1>Unified Call Monitor</h1>
         <p class="muted">Live queue-driven alerts with on-demand transcripts, waveform playback, and quick insights.</p>
       </div>
-      <div class="window-switcher" role="group" aria-label="Time window">
-        <button data-window="24h" class="active">Last 24h</button>
-        <button data-window="7d">Last 7d</button>
-        <button data-window="30d">Last 30d</button>
+      <div class="header-actions">
+        <div class="window-switcher" role="group" aria-label="Time window">
+          <button data-window="24h" class="active">Last 24h</button>
+          <button data-window="7d">Last 7d</button>
+          <button data-window="30d">Last 30d</button>
+        </div>
+        <button id="theme-toggle" class="ghost" type="button" aria-label="Toggle theme">🌙 Dark</button>
       </div>
     </header>
 
     <section class="controls">
-      <div class="field">
-        <label for="search">Search</label>
-        <input id="search" type="search" placeholder="Filename, transcript, tags" />
+      <div class="primary-controls">
+        <div class="field search-field">
+          <label for="search">Search everything</label>
+          <input id="search" type="search" placeholder="Ask for towns, tags, agencies, or filenames" />
+        </div>
+        <div class="control-buttons">
+          <button id="toggle-advanced" class="ghost" type="button">Advanced filters</button>
+          <button id="refresh" class="ghost" type="button">Refresh</button>
+        </div>
       </div>
-      <div class="field">
-        <label for="status">Status</label>
-        <select id="status">
-          <option value="">Any</option>
-          <option value="done">Done</option>
-          <option value="processing">Processing</option>
-          <option value="queued">Queued</option>
-          <option value="error">Error</option>
-        </select>
+
+      <div id="advanced-filters" class="advanced-filters" aria-live="polite">
+        <div class="field">
+          <label for="status">Status</label>
+          <select id="status">
+            <option value="">Any</option>
+            <option value="done">Done</option>
+            <option value="processing">Processing</option>
+            <option value="queued">Queued</option>
+            <option value="error">Error</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="call-type">Call type</label>
+          <select id="call-type">
+            <option value="">Any</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="agency">Agency</label>
+          <select id="agency">
+            <option value="">Any</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="sort">Sort</label>
+          <select id="sort">
+            <option value="recent">Newest first</option>
+            <option value="status">Status</option>
+            <option value="oldest">Oldest first</option>
+          </select>
+        </div>
+        <div class="field tag-filter">
+          <label>Suggested tags</label>
+          <div id="tag-filter" class="tag-row" aria-live="polite"></div>
+        </div>
       </div>
-      <div class="field">
-        <label for="call-type">Call type</label>
-        <select id="call-type">
-          <option value="">Any</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="agency">Agency</label>
-        <select id="agency">
-          <option value="">Any</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="sort">Sort</label>
-        <select id="sort">
-          <option value="recent">Newest first</option>
-          <option value="status">Status</option>
-          <option value="oldest">Oldest first</option>
-        </select>
-      </div>
-      <div class="field tag-filter">
-        <label>Tags</label>
-        <div id="tag-filter" class="tag-row" aria-live="polite"></div>
-      </div>
-      <button id="refresh" class="ghost">Refresh</button>
     </section>
 
     <section id="filter-chips" class="filter-chips" aria-live="polite"></section>
@@ -144,33 +156,53 @@
           <div>
             <p class="eyebrow">Insights</p>
             <h2>Current window</h2>
-            <p class="muted">Small visuals refresh with your filters.</p>
+            <p class="muted">Storytelling charts update with your filters.</p>
           </div>
           <button id="toggle-insights" class="ghost" type="button">Collapse</button>
         </div>
         <div id="insights-body">
           <div class="chart-grid">
-          <div>
-            <h4>Status mix</h4>
-            <div id="status-chart" class="chart"></div>
+            <div>
+              <h4>Status mix</h4>
+              <div id="status-chart" class="chart"></div>
+            </div>
+            <div>
+              <h4>Popular tags</h4>
+              <div id="tag-chart" class="chart"></div>
+            </div>
+            <div>
+              <h4>Agencies</h4>
+              <div id="agency-chart" class="chart"></div>
+            </div>
+            <div>
+              <h4>Towns</h4>
+              <div id="town-chart" class="chart"></div>
+            </div>
           </div>
-          <div>
-            <h4>Popular tags</h4>
-            <div id="tag-chart" class="chart"></div>
-          </div>
-          <div>
-            <h4>Agencies</h4>
-            <div id="agency-chart" class="chart"></div>
-          </div>
-          <div>
-            <h4>Towns</h4>
-            <div id="town-chart" class="chart"></div>
-          </div>
-          </div>
-          <div>
-            <h4>Geography</h4>
-            <p class="muted">Best-effort map using recognized towns or transcript addresses.</p>
-            <div id="map-chart" class="chart map-chart"></div>
+          <div class="insight-row">
+            <div class="story-card">
+              <div class="story-header">
+                <div>
+                  <p class="eyebrow">Narrative highlights</p>
+                  <h3>What matters now</h3>
+                </div>
+                <span class="muted">Auto-updates with the data you see</span>
+              </div>
+              <ul id="story-list" class="story-list"></ul>
+            </div>
+            <div class="map-wrapper">
+              <div class="map-header">
+                <div>
+                  <h4>Geography</h4>
+                  <p class="muted">Interactive density + address markers.</p>
+                </div>
+                <div class="map-controls" role="group" aria-label="Map layers">
+                  <button type="button" id="map-layer-density" class="ghost active">Density</button>
+                  <button type="button" id="map-layer-points" class="ghost">Points</button>
+                </div>
+              </div>
+              <div id="map-chart" class="chart map-chart"></div>
+            </div>
           </div>
         </div>
       </section>
