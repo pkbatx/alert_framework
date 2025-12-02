@@ -27,6 +27,8 @@
   const filterChips = document.getElementById('filter-chips');
   const toggleInsightsBtn = document.getElementById('toggle-insights');
   const insightsBody = document.getElementById('insights-body');
+  const previewImage = document.getElementById('preview-image');
+  const previewLink = document.getElementById('preview-link');
 
   const state = {
     window: '24h',
@@ -389,6 +391,7 @@
     updatedAtEl.textContent = `Updated ${formatDate(call.updated_at)}`;
     renderTags(detailTags, call.tags || []);
     renderTranscript(call);
+    renderPreview(call);
     if (call.audio_url) {
       playBtn.disabled = true;
       createWave(call.audio_url);
@@ -405,6 +408,23 @@
     regenBtn.disabled = false;
     renderList();
     scheduleStatusPolling(call);
+  }
+
+  function renderPreview(call) {
+    if (!previewImage || !previewLink) return;
+    if (call.preview_image) {
+      const cacheBuster = ['processing', 'queued'].includes(call.status) ? `?t=${Date.now()}` : '';
+      previewImage.src = `${call.preview_image}${cacheBuster}`;
+      previewImage.alt = `Preview for ${call.pretty_title || call.filename}`;
+      previewImage.classList.remove('hidden');
+      previewLink.href = call.preview_image;
+      previewLink.classList.remove('hidden');
+    } else {
+      previewImage.classList.add('hidden');
+      previewImage.removeAttribute('src');
+      previewLink.classList.add('hidden');
+      previewLink.removeAttribute('href');
+    }
   }
 
   async function selectCall(call) {

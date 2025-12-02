@@ -187,6 +187,29 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .transcript-segment:hover { border-color: var(--accent); }
 .transcript-segment.active { border-color: var(--accent); background: rgba(124,231,255,0.08); }
 
+.preview-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  background: linear-gradient(120deg, rgba(124,231,255,0.06), rgba(94,245,164,0.05)), var(--card);
+  margin-top: 12px;
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.preview-image {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #0b1021;
+}
+
 .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .chart { min-height: 200px; }
 .map-chart { min-height: 320px; border: 1px solid var(--border); border-radius: 12px; }
