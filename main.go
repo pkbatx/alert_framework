@@ -66,6 +66,8 @@ var (
 	allowedExtensions = map[string]struct{}{
 		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
 	}
+	ffmpegBinary         = "ffmpeg"
+	audioFilterEnabled   = true
 	sussexMinLat         = 40.9
 	sussexMaxLat         = 41.4
 	sussexMinLng         = -75.2
@@ -131,6 +133,7 @@ type transcription struct {
 	ID                   int64      `json:"id"`
 	Filename             string     `json:"filename"`
 	SourcePath           string     `json:"source_path"`
+	ProcessedPath        string     `json:"-"`
 	Source               string     `json:"source"`
 	Transcript           *string    `json:"transcript_text"`
 	RawTranscript        *string    `json:"raw_transcript_text"`
@@ -330,6 +333,13 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
+	audioFilterEnabled = cfg.AudioFilterEnabled
+	ffmpegBinary = strings.TrimSpace(cfg.FFMPEGBin)
+	if ffmpegBinary == "" {
+		ffmpegBinary = "ffmpeg"
+	}
+	log.Printf("audio preprocessing using %s (enabled=%v)", ffmpegBinary, audioFilterEnabled)
+
 	tz, err := time.LoadLocation("EST5EDT")
 	if err != nil {
 		log.Printf("falling back to local timezone: %v", err)
@@ -499,6 +509,7 @@ func initDB(db *sql.DB) error {
 		{version: 2, name: "add ingest source", up: migrateAddIngestSource},
 		{version: 3, name: "add call metadata columns", up: migrateAddCallMetadata},
 		{version: 4, name: "add location columns", up: migrateAddLocationColumns},
+		{version: 5, name: "add processed audio path", up: migrateAddProcessedPath},
 	}
 	return applyMigrations(db, migrations)
 }
@@ -546,6 +557,7 @@ func migrateBaseline(db *sql.DB) error {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     filename TEXT UNIQUE NOT NULL,
     source_path TEXT NOT NULL,
+    processed_path TEXT NULL,
     ingest_source TEXT NULL,
     transcript_text TEXT NULL,
     raw_transcript_text TEXT NULL,
@@ -598,6 +610,7 @@ END;`
 		"longitude":                "REAL",
 		"location_label":           "TEXT",
 		"location_source":          "TEXT",
+		"processed_path":           "TEXT",
 	}
 	for col, colType := range needed {
 		if err := addColumnIfMissing(db, "transcriptions", col, colType); err != nil {
@@ -663,6 +676,14 @@ func migrateAddLocationColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func migrateAddProcessedPath(db *sql.DB) error {
+	if err := addColumnIfMissing(db, "transcriptions", "processed_path", "TEXT"); err != nil {
+		return err
+	}
+	_, err := execWithRetry(db, `UPDATE transcriptions SET processed_path = source_path WHERE processed_path IS NULL OR processed_path = ''`)
+	return err
 }
 
 func addColumnIfMissing(db *sql.DB, table, column, colType string) error {
@@ -863,6 +884,38 @@ func (s *server) previewURL(base, filename string) string {
 	return fmt.Sprintf("%s/preview/%s.png", base, url.PathEscape(filename))
 }
 
+// ProcessAudioWithFFmpeg takes a raw file and returns a processed path.
+func ProcessAudioWithFFmpeg(ctx context.Context, rawPath string) (string, error) {
+	if !audioFilterEnabled {
+		return rawPath, nil
+	}
+
+	ffmpegBin := strings.TrimSpace(ffmpegBinary)
+	if ffmpegBin == "" {
+		ffmpegBin = "ffmpeg"
+	}
+
+	ext := filepath.Ext(rawPath)
+	base := strings.TrimSuffix(filepath.Base(rawPath), ext)
+	processedName := base + "_proc" + ext
+	processedPath := filepath.Join(filepath.Dir(rawPath), processedName)
+
+	filterChain := "highpass=f=200,lowpass=f=3600,anequalizer=f=60:t=o:w=10:g=-25,anequalizer=f=120:t=o:w=10:g=-20,anequalizer=f=180:t=o:w=10:g=-15,afftdn=nr=10:nf=-30,acompressor=threshold=-20dB:ratio=3:attack=5:release=200,alimiter=limit=-2dB"
+	args := []string{"-y", "-i", rawPath, "-ac", "1", "-ar", "16000", "-af", filterChain, processedPath}
+	cmd := exec.CommandContext(ctx, ffmpegBin, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	if err := cmd.Run(); err != nil {
+		log.Printf("ffmpeg processing failed for %s: %v (stderr: %s)", rawPath, err, strings.TrimSpace(stderr.String()))
+		return rawPath, err
+	}
+
+	log.Printf("ffmpeg processed audio input=%s output=%s duration_ms=%d", rawPath, processedPath, time.Since(start).Milliseconds())
+	return processedPath, nil
+}
+
 func (s *server) processFile(ctx context.Context, j processJob) error {
 	filename := j.filename
 	sourcePath := filepath.Join(s.cfg.CallsDir, filename)
@@ -898,6 +951,15 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		return err
 	}
 
+	processedPath, procErr := ProcessAudioWithFFmpeg(ctx, sourcePath)
+	if procErr != nil {
+		log.Printf("audio preprocessing skipped for %s: %v", filename, procErr)
+		processedPath = sourcePath
+	}
+	if err := s.updateProcessedPath(filename, processedPath); err != nil {
+		log.Printf("failed to record processed path for %s: %v", filename, err)
+	}
+
 	duration := probeDuration(sourcePath)
 	hashValue, err := hashFile(sourcePath)
 	if err != nil {
@@ -924,8 +986,8 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		return nil
 	}
 
-	stagedPath := filepath.Join(s.cfg.WorkDir, filename)
-	if err := copyFile(sourcePath, stagedPath); err != nil {
+	stagedPath := filepath.Join(s.cfg.WorkDir, filepath.Base(processedPath))
+	if err := copyFile(processedPath, stagedPath); err != nil {
 		s.markError(filename, err)
 		status = err.Error()
 		decodeDur = time.Since(decodeStart)
@@ -2029,7 +2091,7 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 	windowName, windowDuration := normalizeWindowName(rawWindow, "6h")
 
 	baseURL := s.resolveBaseURL(r)
-	query := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
+	query := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
 	args := []interface{}{}
 	var cutoff time.Time
 	if windowDuration > 0 {
@@ -2081,7 +2143,7 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 	var calls []transcriptionResponse
 	for rows.Next() {
 		var t transcription
-		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.ProcessedPath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
@@ -2146,7 +2208,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	windowName, windowDuration := normalizeWindowName(rawWindow, "24h")
 
-	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
+	base := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
 	where := []string{}
 	args := []interface{}{}
 	var cutoff time.Time
@@ -2184,7 +2246,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	var calls []transcriptionResponse
 	for rows.Next() {
 		var t transcription
-		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.ProcessedPath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
@@ -2585,6 +2647,16 @@ func (s *server) buildSegments(t transcription) []transcriptSegment {
 	return fallbackSegmentsFromTranscript(transcriptText, t.DurationSeconds)
 }
 
+func (s *server) audioFilename(t transcription) string {
+	if name := filepath.Base(strings.TrimSpace(t.ProcessedPath)); name != "" {
+		return name
+	}
+	if name := filepath.Base(strings.TrimSpace(t.SourcePath)); name != "" {
+		return name
+	}
+	return t.Filename
+}
+
 func (s *server) toResponse(t transcription, baseURL string) transcriptionResponse {
 	meta, err := formatting.ParseCallMetadataFromFilename(t.Filename, s.tz)
 	if err != nil {
@@ -2650,7 +2722,7 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 		PrettyTitle:          pretty,
 		Town:                 meta.TownDisplay,
 		Agency:               meta.AgencyDisplay,
-		AudioURL:             s.publicURL(baseURL, t.Filename),
+		AudioURL:             s.publicURL(baseURL, s.audioFilename(t)),
 		PreviewImage:         s.previewURL(baseURL, t.Filename),
 		Tags:                 tags,
 		Segments:             s.buildSegments(t),
@@ -2961,8 +3033,8 @@ func (s *server) ensureSettingsRow() error {
 func (s *server) getTranscription(filename string) (*transcription, error) {
 	var t transcription
 	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
-		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt)
-	}, `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
+		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.ProcessedPath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt)
+	}, `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -2977,8 +3049,8 @@ func (s *server) markQueued(filename, sourcePath, source string, size int64, opt
 	if callTimestamp.IsZero() {
 		callTimestamp = time.Now().In(s.tz)
 	}
-	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format, call_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format), call_timestamp=COALESCE(transcriptions.call_timestamp, excluded.call_timestamp)`, filename, sourcePath, source, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format, callTimestamp)
+	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, processed_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format, call_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, processed_path=COALESCE(excluded.processed_path, transcriptions.processed_path), ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format), call_timestamp=COALESCE(transcriptions.call_timestamp, excluded.call_timestamp)`, filename, sourcePath, sourcePath, source, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format, callTimestamp)
 	return err
 }
 
@@ -2987,7 +3059,16 @@ func (s *server) markProcessing(filename, sourcePath, source string, size int64,
 	if callTimestamp.IsZero() {
 		callTimestamp = time.Now().In(s.tz)
 	}
-	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format, call_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format, call_timestamp=COALESCE(transcriptions.call_timestamp, excluded.call_timestamp)`, filename, sourcePath, source, statusProcessing, size, opts.Model, opts.Mode, opts.Format, callTimestamp)
+	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, processed_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format, call_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, processed_path=COALESCE(excluded.processed_path, transcriptions.processed_path), ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format, call_timestamp=COALESCE(transcriptions.call_timestamp, excluded.call_timestamp)`, filename, sourcePath, sourcePath, source, statusProcessing, size, opts.Model, opts.Mode, opts.Format, callTimestamp)
+	return err
+}
+
+func (s *server) updateProcessedPath(filename, processedPath string) error {
+	if strings.TrimSpace(processedPath) == "" {
+		return nil
+	}
+	_, err := execWithRetry(s.db, `UPDATE transcriptions SET processed_path=? WHERE filename=?`, processedPath, filename)
 	return err
 }
 
