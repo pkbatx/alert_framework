@@ -34,10 +34,21 @@
           <p class="eyebrow">Situational awareness</p>
           <h1>CAD-style command console</h1>
           <p class="muted">One glance for live incidents, queue health, and field context across the county.</p>
+          <div class="module-pills" role="group" aria-label="Key modules">
+            <button class="pill live" type="button">Live monitor</button>
+            <button class="pill" type="button">Incident log</button>
+            <button class="pill" type="button">Push status</button>
+            <button class="pill" type="button">Open incidents</button>
+            <button class="pill" type="button">On-shift focus</button>
+            <button class="pill" type="button">Queue health</button>
+            <button class="pill" type="button">Jobs + transcripts</button>
+            <button class="pill" type="button">Audio + map</button>
+            <button class="pill calm" type="button">Soft monitoring</button>
+          </div>
         </div>
         <div class="console-actions" role="group" aria-label="Console controls">
-          <div class="pill live">Live monitor</div>
-          <div class="pill calm">Quiet scan</div>
+          <div class="action-chip">Live monitor</div>
+          <div class="action-chip calm">Quiet scan</div>
           <button class="ghost" type="button">Incident log</button>
           <button class="ghost" type="button">Push status</button>
         </div>
@@ -75,7 +86,19 @@
       <div class="primary-controls">
         <div class="field search-field">
           <label for="search">Search everything</label>
-          <input id="search" type="search" placeholder="Ask for towns, tags, agencies, or filenames" />
+          <div class="search-stack">
+            <input id="search" type="search" placeholder="Ask for towns, tags, agencies, or filenames" />
+            <div class="suggestions" id="search-suggestions" aria-live="polite">
+              <span class="muted">Suggested:</span>
+              <div class="suggestion-row">
+                <button type="button" data-value="Newton EMS">Newton EMS</button>
+                <button type="button" data-value="Andover">Andover</button>
+                <button type="button" data-value="Fire">Fire</button>
+                <button type="button" data-value="Medical">Medical</button>
+                <button type="button" data-value="Queued">Queued</button>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="control-buttons">
           <button id="toggle-advanced" class="ghost" type="button">Advanced filters</button>
@@ -83,45 +106,57 @@
         </div>
       </div>
 
-      <div id="advanced-filters" class="advanced-filters" aria-live="polite">
-        <div class="field">
-          <label for="status">Status</label>
-          <select id="status">
-            <option value="">Any</option>
-            <option value="done">Done</option>
-            <option value="processing">Processing</option>
-            <option value="queued">Queued</option>
-            <option value="error">Error</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="call-type">Call type</label>
-          <select id="call-type">
-            <option value="">Any</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="agency">Agency</label>
-          <select id="agency">
-            <option value="">Any</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="sort">Sort</label>
-          <select id="sort">
-            <option value="recent">Newest first</option>
-            <option value="status">Status</option>
-            <option value="oldest">Oldest first</option>
-          </select>
-        </div>
-        <div class="field tag-filter">
-          <label>Suggested tags</label>
-          <div id="tag-filter" class="tag-row" aria-live="polite"></div>
-        </div>
-      </div>
+      <div id="filter-chips" class="filter-chips" aria-live="polite"></div>
     </section>
 
-    <section id="filter-chips" class="filter-chips" aria-live="polite"></section>
+    <div id="filters-drawer" class="filters-drawer" aria-hidden="true">
+      <div class="drawer-overlay" id="filters-overlay"></div>
+      <div class="drawer-panel" role="dialog" aria-labelledby="filters-title">
+        <div class="drawer-header">
+          <div>
+            <p class="eyebrow">Precision targeting</p>
+            <h3 id="filters-title">Advanced filters</h3>
+          </div>
+          <button id="close-filters" class="ghost" type="button">Close</button>
+        </div>
+        <div id="advanced-filters" class="advanced-filters" aria-live="polite">
+          <div class="field">
+            <label for="status">Status</label>
+            <select id="status">
+              <option value="">Any</option>
+              <option value="done">Done</option>
+              <option value="processing">Processing</option>
+              <option value="queued">Queued</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="call-type">Call type</label>
+            <select id="call-type">
+              <option value="">Any</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="agency">Agency</label>
+            <select id="agency">
+              <option value="">Any</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="sort">Sort</label>
+            <select id="sort">
+              <option value="recent">Newest first</option>
+              <option value="status">Status</option>
+              <option value="oldest">Oldest first</option>
+            </select>
+          </div>
+          <div class="field tag-filter">
+            <label>Suggested tags</label>
+            <div id="tag-filter" class="tag-row" aria-live="polite"></div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <main class="layout">
       <section class="map-list">
@@ -199,11 +234,11 @@
         </div>
       </section>
 
-      <section class="panel insights-panel">
-        <div class="panel-header">
-          <div>
-            <p class="eyebrow">Highlights</p>
-            <h2>Quick stats</h2>
+    <section class="panel insights-panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Highlights</p>
+          <h2>Quick stats</h2>
             <p class="muted">Insights only include completed, non-duplicate transcriptions from the past day.</p>
           </div>
           <button id="toggle-insights" class="ghost" type="button">Collapse</button>
@@ -222,6 +257,14 @@
         </div>
       </section>
     </main>
+    <footer class="status-bar" aria-label="System status">
+      <div class="status-pill online">Connected</div>
+      <span class="muted">Data-source: queue + mapbox + transcripts</span>
+      <div class="status-actions">
+        <button class="ghost" type="button">Settings</button>
+        <button class="ghost" type="button">Profile</button>
+      </div>
+    </footer>
   </div>
   <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
   <script src="https://api.mapbox.com/mapbox-gl-js/v3.1.2/mapbox-gl.js"></script>
