@@ -29,6 +29,13 @@
   const insightsBody = document.getElementById('insights-body');
   const previewImage = document.getElementById('preview-image');
   const previewLink = document.getElementById('preview-link');
+  const themeToggle = document.getElementById('theme-toggle');
+  const toggleAdvancedBtn = document.getElementById('toggle-advanced');
+  const advancedFilters = document.getElementById('advanced-filters');
+  const mapLayerDensity = document.getElementById('map-layer-density');
+  const mapLayerPoints = document.getElementById('map-layer-points');
+  const storyList = document.getElementById('story-list');
+  const themeColorMeta = document.getElementById('theme-color-meta');
 
   const state = {
     window: '24h',
@@ -45,7 +52,9 @@
     segments: [],
     mapboxToken: '',
     map: null,
-    mapMarkers: [],
+    theme: 'dark',
+    mapLayerVisibility: { density: true, points: false },
+    mapGeoJSON: { type: 'FeatureCollection', features: [] },
     geocodeCache: new Map(),
     pollTimer: null,
     inlineAudio: null,
@@ -54,6 +63,36 @@
 
   const MAP_DEFAULT_CENTER = [-74.696, 41.05];
   const MAP_DEFAULT_ZOOM = 8;
+  const THEME_STORAGE_KEY = 'alert-dashboard-theme';
+
+  function applyTheme(nextTheme) {
+    const theme = nextTheme === 'light' ? 'light' : 'dark';
+    state.theme = theme;
+    document.body.dataset.theme = theme;
+    if (themeToggle) themeToggle.textContent = theme === 'dark' ? '🌙 Dark' : '☀️ Light';
+    if (themeColorMeta) themeColorMeta.setAttribute('content', theme === 'dark' ? '#080c1c' : '#f7f9fd');
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+    if (state.map) {
+      const style = theme === 'light' ? 'mapbox://styles/mapbox/light-v11' : 'mapbox://styles/mapbox/dark-v11';
+      state.map.setStyle(style);
+      state.map.once('styledata', () => {
+        ensureMapSource();
+        refreshMapLayers();
+      });
+    }
+  }
+
+  function initializeTheme() {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    applyTheme(saved || (prefersDark ? 'dark' : 'light'));
+  }
+
+  function toggleAdvancedFilters() {
+    if (!advancedFilters) return;
+    const collapsed = advancedFilters.classList.toggle('collapsed');
+    toggleAdvancedBtn.textContent = collapsed ? 'Advanced filters' : 'Hide advanced';
+  }
 
   function setWindow(next) {
     state.window = next;
@@ -533,13 +572,7 @@
     }
   }
 
-  function clearMapMarkers() {
-    state.mapMarkers.forEach((marker) => marker.remove());
-    state.mapMarkers = [];
-  }
-
   function destroyMapInstance() {
-    clearMapMarkers();
     if (state.map) {
       state.map.remove();
       state.map = null;
@@ -584,6 +617,111 @@
     state.map.setZoom(MAP_DEFAULT_ZOOM);
   }
 
+  function buildFeatureCollection(points) {
+    return {
+      type: 'FeatureCollection',
+      features: points.map((point, idx) => ({
+        type: 'Feature',
+        id: point.call.filename || idx,
+        geometry: { type: 'Point', coordinates: [point.lon, point.lat] },
+        properties: {
+          title: callSummary(point.call),
+          subtitle: point.call.town || point.call.agency || 'Unknown area',
+          timestamp: formatDate(point.call.call_timestamp),
+          weight: Math.max(0.3, Math.min(1, (point.call.duration_seconds || 60) / 600)),
+        },
+      })),
+    };
+  }
+
+  function ensureMapSource() {
+    if (!state.map) return;
+    if (!state.map.getSource('call-points')) {
+      state.map.addSource('call-points', { type: 'geojson', data: state.mapGeoJSON });
+    }
+    if (!state.map.getLayer('call-heatmap')) {
+      state.map.addLayer({
+        id: 'call-heatmap',
+        type: 'heatmap',
+        source: 'call-points',
+        maxzoom: 15,
+        paint: {
+          'heatmap-weight': ['get', 'weight'],
+          'heatmap-intensity': 1,
+          'heatmap-radius': 30,
+          'heatmap-opacity': state.mapLayerVisibility.density ? 0.85 : 0,
+          'heatmap-color': [
+            'interpolate',
+            ['linear'],
+            ['heatmap-density'],
+            0, 'rgba(124, 231, 255, 0)',
+            0.2, 'rgba(124, 231, 255, 0.35)',
+            0.5, 'rgba(167, 139, 250, 0.55)',
+            0.8, 'rgba(94, 245, 164, 0.7)',
+            1, 'rgba(255, 209, 102, 0.8)'
+          ],
+        },
+      });
+    }
+    if (!state.map.getLayer('call-circles')) {
+      state.map.addLayer({
+        id: 'call-circles',
+        type: 'circle',
+        source: 'call-points',
+        minzoom: 5,
+        paint: {
+          'circle-radius': 8,
+          'circle-color': '#7ce7ff',
+          'circle-stroke-color': '#0b1021',
+          'circle-stroke-width': 1,
+          'circle-opacity': state.mapLayerVisibility.points ? 0.95 : 0,
+        },
+      });
+      state.map.on('click', 'call-circles', (evt) => {
+        const feature = evt.features?.[0];
+        if (!feature) return;
+        const coordinates = feature.geometry.coordinates.slice();
+        const html = `
+          <div>
+            <strong>${feature.properties.title}</strong>
+            <div class="muted">${feature.properties.timestamp}</div>
+            <div class="muted">${feature.properties.subtitle}</div>
+          </div>`;
+        new mapboxgl.Popup({ offset: 12 }).setLngLat(coordinates).setHTML(html).addTo(state.map);
+      });
+    }
+  }
+
+  function refreshMapLayers(boundsData) {
+    if (!state.map) return;
+    ensureMapSource();
+    const source = state.map.getSource('call-points');
+    if (source) {
+      source.setData(state.mapGeoJSON);
+    }
+    if (state.map.getLayer('call-heatmap')) {
+      state.map.setPaintProperty('call-heatmap', 'heatmap-opacity', state.mapLayerVisibility.density ? 0.85 : 0);
+    }
+    if (state.map.getLayer('call-circles')) {
+      state.map.setPaintProperty('call-circles', 'circle-opacity', state.mapLayerVisibility.points ? 0.95 : 0);
+    }
+    if (boundsData && boundsData.isValid) {
+      state.map.fitBounds(boundsData.bounds, { padding: 48, maxZoom: 13 });
+    }
+    scheduleMapResize();
+  }
+
+  function syncMapLayerButtons() {
+    if (mapLayerDensity) mapLayerDensity.classList.toggle('active', state.mapLayerVisibility.density);
+    if (mapLayerPoints) mapLayerPoints.classList.toggle('active', state.mapLayerVisibility.points);
+  }
+
+  function setMapLayerVisibility(layer, enabled) {
+    state.mapLayerVisibility = { ...state.mapLayerVisibility, [layer]: enabled };
+    syncMapLayerButtons();
+    refreshMapLayers();
+  }
+
   async function updateMapMarkers(calls, token) {
     if (!state.map) return;
     const warnState = { logged: false };
@@ -598,35 +736,20 @@
       points.push({ call, ...coords });
     }
 
-    clearMapMarkers();
     if (!points.length) {
+      state.mapGeoJSON = { type: 'FeatureCollection', features: [] };
       resetMapView();
       setMapOverlay('No mappable locations', 'No calls with mappable locations for the current filters.');
+      refreshMapLayers();
       scheduleMapResize();
       return;
     }
 
     clearMapOverlay();
+    state.mapGeoJSON = buildFeatureCollection(points);
     const bounds = new mapboxgl.LngLatBounds();
-    points.forEach((point) => {
-      const popupHtml = `
-        <div>
-          <strong>${callSummary(point.call)}</strong>
-          <div class="muted">${formatDate(point.call.call_timestamp)}</div>
-          <div class="muted">${point.call.town || point.call.agency || 'Unknown area'}</div>
-        </div>`;
-      const popup = new mapboxgl.Popup({ offset: 12 }).setHTML(popupHtml);
-      const marker = new mapboxgl.Marker({ color: '#7ce7ff' }).setLngLat([point.lon, point.lat]).setPopup(popup).addTo(state.map);
-      state.mapMarkers.push(marker);
-      bounds.extend([point.lon, point.lat]);
-    });
-
-    if (!bounds.isEmpty()) {
-      state.map.fitBounds(bounds, { padding: 48, maxZoom: 13 });
-    } else {
-      resetMapView();
-    }
-    scheduleMapResize();
+    points.forEach((point) => bounds.extend([point.lon, point.lat]));
+    refreshMapLayers({ bounds, isValid: !bounds.isEmpty() });
   }
 
   async function renderMap() {
@@ -652,13 +775,14 @@
       mapChart.innerHTML = '';
       state.map = new mapboxgl.Map({
         container: 'map-chart',
-        style: 'mapbox://styles/mapbox/dark-v11',
+        style: state.theme === 'light' ? 'mapbox://styles/mapbox/light-v11' : 'mapbox://styles/mapbox/dark-v11',
         center: MAP_DEFAULT_CENTER,
         zoom: MAP_DEFAULT_ZOOM,
       });
       state.map.addControl(new mapboxgl.NavigationControl(), 'top-right');
       state.map.addControl(new mapboxgl.ScaleControl({ maxWidth: 120, unit: 'imperial' }), 'bottom-right');
       state.map.on('load', () => {
+        ensureMapSource();
         updateMapMarkers(getVisibleCalls(), token);
         scheduleMapResize();
       });
@@ -698,6 +822,64 @@
     });
 
     renderMap();
+    renderStories();
+  }
+
+  function renderStories() {
+    if (!storyList) return;
+    storyList.innerHTML = '';
+    const items = [];
+    const statusCounts = state.stats?.status_counts || {};
+    const active = (statusCounts.processing || 0) + (statusCounts.queued || 0);
+    if (active) {
+      items.push({
+        emoji: '⚡',
+        text: `${active} call${active === 1 ? '' : 's'} actively transcribing or queued right now.`,
+      });
+    }
+
+    const pastHour = callsWithinMinutes(state.calls, 60).length;
+    if (pastHour) {
+      items.push({ emoji: '📈', text: `${pastHour} call${pastHour === 1 ? '' : 's'} landed in the past hour.` });
+    }
+
+    const topAgency = Object.entries(state.stats?.agency_counts || {}).sort((a, b) => b[1] - a[1])[0];
+    if (topAgency) {
+      items.push({ emoji: '🏢', text: `${topAgency[0]} is handling ${topAgency[1]} call${topAgency[1] === 1 ? '' : 's'} this window.` });
+    }
+
+    const topTag = Object.entries(state.stats?.tag_counts || {}).sort((a, b) => b[1] - a[1])[0];
+    if (topTag) {
+      items.push({ emoji: '🏷️', text: `Tag “${topTag[0]}” appears ${topTag[1]} time${topTag[1] === 1 ? '' : 's'}.` });
+    }
+
+    const recent = getVisibleCalls()[0];
+    if (recent) {
+      items.push({
+        emoji: '🛰️',
+        text: `Latest call: ${callSummary(recent)} at ${formatDate(recent.call_timestamp)}.`,
+      });
+    }
+
+    if (!items.length) {
+      const li = document.createElement('li');
+      li.className = 'muted';
+      li.textContent = 'Insights appear once calls load.';
+      storyList.appendChild(li);
+      return;
+    }
+
+    items.slice(0, 4).forEach((item) => {
+      const li = document.createElement('li');
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.textContent = item.emoji;
+      const copy = document.createElement('span');
+      copy.textContent = item.text;
+      li.appendChild(dot);
+      li.appendChild(copy);
+      storyList.appendChild(li);
+    });
   }
 
   function renderTagFilterOptions() {
@@ -885,7 +1067,30 @@
     }
   });
 
+  if (themeToggle) {
+    themeToggle.addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
+  }
+
+  if (toggleAdvancedBtn) {
+    toggleAdvancedBtn.addEventListener('click', toggleAdvancedFilters);
+  }
+
+  if (mapLayerDensity) {
+    mapLayerDensity.addEventListener('click', () => setMapLayerVisibility('density', !state.mapLayerVisibility.density));
+  }
+
+  if (mapLayerPoints) {
+    mapLayerPoints.addEventListener('click', () => setMapLayerVisibility('points', !state.mapLayerVisibility.points));
+  }
+
   window.addEventListener('resize', scheduleMapResize);
 
+  if (advancedFilters) {
+    advancedFilters.classList.add('collapsed');
+    if (toggleAdvancedBtn) toggleAdvancedBtn.textContent = 'Advanced filters';
+  }
+
+  initializeTheme();
+  syncMapLayerButtons();
   fetchCalls();
 })();
