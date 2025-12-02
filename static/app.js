@@ -44,6 +44,9 @@
     wavesurfer: null,
     segments: [],
     mapboxToken: '',
+    map: null,
+    mapLayer: null,
+    mapTile: null,
     pollTimer: null,
     inlineAudio: null,
   };
@@ -476,6 +479,25 @@
 
   function renderMap() {
     if (!mapChart) return;
+    if (typeof L === 'undefined') {
+      mapChart.innerHTML = '<div class="map-empty"><div><h4>Map unavailable</h4><p class="muted">Map library failed to load. Please refresh.</p></div></div>';
+      return;
+    }
+
+    const { url: tileUrl, attribution } = (function resolveTileLayer() {
+      const token = state.mapboxToken && state.mapboxToken.trim();
+      if (token) {
+        return {
+          url: `https://api.mapbox.com/styles/v1/mapbox/dark-v11/tiles/256/{z}/{x}/{y}{r}?access_token=${token}`,
+          attribution: '© Mapbox © OpenStreetMap contributors',
+        };
+      }
+      return {
+        url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        attribution: '© OpenStreetMap contributors, © CARTO',
+      };
+    })();
+
     const callsForMap = getVisibleCalls();
     const points = callsForMap
       .filter((call) => call.location && Number.isFinite(call.location.latitude) && Number.isFinite(call.location.longitude))
@@ -485,36 +507,61 @@
         label: call.location.label || call.pretty_title || call.filename,
       }));
 
-    if (!state.mapboxToken) {
-      mapChart.innerHTML = '<p class="muted">Add MAPBOX_TOKEN to enable mapping.</p>';
-      Plotly.purge('map-chart');
-      return;
-    }
-
     if (!points.length) {
-      mapChart.innerHTML = '<p class="muted">No mappable calls in this view yet.</p>';
-      Plotly.purge('map-chart');
+      if (state.map) {
+        state.map.remove();
+        state.map = null;
+        state.mapLayer = null;
+        state.mapTile = null;
+      }
+      mapChart.innerHTML = '<div class="map-empty"><div><p class="eyebrow">Geography</p><h4>No mappable calls yet</h4><p class="muted">We\'ll place pins as soon as addresses are recognized.</p></div></div>';
       return;
     }
 
-    Plotly.setPlotConfig({ mapboxAccessToken: state.mapboxToken });
-    Plotly.newPlot('map-chart', [{
-      type: 'scattermapbox',
-      lat: points.map((p) => p.lat),
-      lon: points.map((p) => p.lon),
-      text: points.map((p) => p.label),
-      marker: { size: 10, color: '#7ce7ff' },
-      hovertemplate: '%{text}<extra></extra>',
-    }], {
-      mapbox: {
-        style: 'mapbox/dark-v11',
-        center: { lon: -74.696, lat: 41.05 },
-        zoom: 8,
-      },
-      margin: { t: 0, l: 0, r: 0, b: 0 },
-      paper_bgcolor: 'transparent',
-      plot_bgcolor: 'transparent',
-    }, { displayModeBar: false });
+    if (!state.map) {
+      mapChart.innerHTML = '';
+      state.map = L.map('map-chart', { zoomControl: false, attributionControl: false });
+      state.mapTile = L.tileLayer(tileUrl, { attribution, maxZoom: 19 }).addTo(state.map);
+      state.mapLayer = L.layerGroup().addTo(state.map);
+      L.control.attribution({ prefix: '' }).addTo(state.map);
+    } else {
+      if (state.mapTile) {
+        state.mapTile.setUrl(tileUrl);
+      }
+      if (state.mapLayer) {
+        state.mapLayer.clearLayers();
+      }
+    }
+
+    let badge = mapChart.querySelector('.map-badge');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'map-badge';
+      mapChart.appendChild(badge);
+    }
+    badge.innerHTML = `<strong>${points.length} ${points.length === 1 ? 'pin' : 'pins'}</strong><span>${state.mapboxToken ? 'Mapbox tiles enabled' : 'Using open map tiles'}</span>`;
+
+    points.forEach((point) => {
+      const marker = L.circleMarker([point.lat, point.lon], {
+        radius: 9,
+        color: '#7ce7ff',
+        weight: 2,
+        fillColor: '#7ce7ff',
+        fillOpacity: 0.8,
+      }).bindTooltip(point.label, { direction: 'top', offset: [0, -4] });
+
+      if (state.mapLayer) {
+        state.mapLayer.addLayer(marker);
+      } else {
+        marker.addTo(state.map);
+      }
+    });
+
+    const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon]));
+    if (bounds.isValid()) {
+      state.map.fitBounds(bounds, { padding: [32, 32], maxZoom: 12 });
+    }
+    state.map.invalidateSize();
   }
 
   function applyStats() {
