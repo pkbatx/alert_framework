@@ -213,7 +213,8 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .chart { min-height: 200px; }
 .map-chart {
-  min-height: 380px;
+  width: 100%;
+  min-height: 320px;
   border: 1px solid var(--border);
   border-radius: 16px;
   position: relative;
@@ -253,22 +254,28 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .map-empty h4 { margin: 4px 0; color: var(--text); }
 
-.leaflet-container { height: 100%; background: transparent; }
+.mapboxgl-canvas {
+  border-radius: 16px;
+}
 
-.leaflet-popup-content-wrapper,
-.leaflet-tooltip {
+.mapboxgl-popup-content {
   background: rgba(11, 16, 33, 0.9);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 15px 40px rgba(0, 0, 0, 0.45);
+  font-family: var(--font, 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
-.leaflet-popup-tip,
-.leaflet-tooltip-top:before,
-.leaflet-tooltip-bottom:before { background: rgba(11, 16, 33, 0.9); }
+.mapboxgl-popup-tip { border-top-color: rgba(11, 16, 33, 0.9); border-bottom-color: rgba(11, 16, 33, 0.9); }
 
-.leaflet-control-zoom { display: none; }
+.mapboxgl-ctrl-group {
+  border: 1px solid var(--border);
+  background: rgba(11, 16, 33, 0.9);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.mapboxgl-ctrl button { filter: invert(1) grayscale(1); }
 
 .tag-row { display: flex; gap: 8px; flex-wrap: wrap; min-height: 38px; }
 .filter-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
