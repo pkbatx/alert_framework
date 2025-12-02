@@ -22,6 +22,7 @@ type Config struct {
 	DBPath        string
 	DevUI         bool
 	MapboxToken   string
+	PublicBaseURL string
 }
 
 const (
@@ -50,6 +51,7 @@ func Load() (Config, error) {
 		DBPath:        getEnv("DB_PATH", defaultDBPath),
 		DevUI:         parseBoolEnv("DEV_UI"),
 		MapboxToken:   os.Getenv("MAPBOX_TOKEN"),
+		PublicBaseURL: strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 	}
 	if os.Getenv("DB_PATH") == "" {
 		cfg.DBPath = filepath.Join(cfg.WorkDir, filepath.Base(defaultDBPath))
