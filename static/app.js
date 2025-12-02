@@ -169,12 +169,14 @@
   function renderTags(container, tags, clickable = false) {
     container.innerHTML = '';
     tags.forEach((tag) => {
-      const pill = document.createElement('span');
+      const pill = document.createElement(clickable ? 'button' : 'span');
       pill.className = 'tag';
       pill.textContent = tag;
       if (clickable) {
         const active = state.tagFilter.includes(tag.toLowerCase());
         pill.classList.toggle('active', active);
+        pill.setAttribute('aria-pressed', active);
+        pill.type = 'button';
         pill.addEventListener('click', () => toggleTag(tag));
       }
       container.appendChild(pill);
@@ -857,6 +859,7 @@
       pill.className = 'tag';
       pill.textContent = tag;
       if (state.tagFilter.includes(tag.toLowerCase())) pill.classList.add('active');
+      pill.setAttribute('aria-pressed', state.tagFilter.includes(tag.toLowerCase()));
       pill.addEventListener('click', () => toggleTag(tag));
       tagFilterEl.appendChild(pill);
     });
