@@ -21,17 +21,21 @@
       <div class="nav-actions">
         <div class="window-switcher" role="group" aria-label="Time window">
           <button data-window="6h" class="active">Last 6h</button>
+          <button data-window="12h">Last 12h</button>
+          <button data-window="24h">Last 24h</button>
+          <button data-window="72h">Last 72h</button>
+          <button data-window="all">All</button>
         </div>
         <button id="theme-toggle" class="ghost" type="button" aria-label="Toggle theme">🌙 Dark</button>
       </div>
     </div>
 
-    <section class="summary-bar" aria-label="Six-hour overview">
-      <div class="summary-chip">Last 6h</div>
+    <section class="summary-bar" aria-label="Activity overview">
+      <div class="summary-chip" id="summary-window">Last 6h</div>
       <div class="summary-metric">
         <p class="eyebrow">Total incidents</p>
         <strong id="summary-total">—</strong>
-        <span class="muted">Past six hours</span>
+        <span class="muted" id="summary-window-hint">Past six hours</span>
       </div>
       <div class="summary-metric">
         <p class="eyebrow">Top type</p>

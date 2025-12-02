@@ -37,6 +37,8 @@
   const summaryTopType = document.getElementById('summary-top-type');
   const summaryAgency = document.getElementById('summary-agency');
   const summaryStatus = document.getElementById('summary-status');
+  const summaryWindow = document.getElementById('summary-window');
+  const summaryWindowHint = document.getElementById('summary-window-hint');
   const themeColorMeta = document.getElementById('theme-color-meta');
   const suggestionList = document.getElementById('search-suggestions');
 
@@ -50,7 +52,7 @@
     tagFilter: [],
     calls: [],
     stats: null,
-    lastSixHourStats: null,
+    summaryStats: null,
     selected: null,
     wavesurfer: null,
     segments: [],
@@ -117,21 +119,23 @@
 
   function setWindow(next) {
     state.window = next;
+    state.summaryStats = null;
     windowButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.window === next));
+    renderSummaryBar();
     fetchCalls();
-    if (next === '6h') {
-      fetchSixHourStats();
-    }
+    fetchSummaryStats();
   }
 
   function windowHours() {
     switch (state.window) {
       case '6h':
         return 6;
-      case '7d':
-        return 7 * 24;
-      case '30d':
-        return 30 * 24;
+      case '12h':
+        return 12;
+      case '72h':
+        return 72;
+      case 'all':
+        return null;
       default:
         return 24;
     }
@@ -141,13 +145,41 @@
     switch (state.window) {
       case '6h':
         return 'the last 6 hours';
-      case '7d':
-        return 'the last 7 days';
-      case '30d':
-        return 'the last 30 days';
+      case '12h':
+        return 'the last 12 hours';
+      case '72h':
+        return 'the last 72 hours';
+      case 'all':
+        return 'all time';
       default:
         return 'the last 24 hours';
     }
+  }
+
+  function windowChipLabel() {
+    switch (state.window) {
+      case 'all':
+        return 'All';
+      case '12h':
+        return 'Last 12h';
+      case '24h':
+        return 'Last 24h';
+      case '72h':
+        return 'Last 72h';
+      default:
+        return 'Last 6h';
+    }
+  }
+
+  function windowHintLabel() {
+    if (state.window === 'all') {
+      return 'All recorded calls';
+    }
+    const label = windowLabel();
+    if (label.startsWith('the last ')) {
+      return `Past ${label.replace('the last ', '')}`;
+    }
+    return label;
   }
 
   function stopPolling() {
@@ -562,6 +594,7 @@
     const ts = tsValue ? new Date(tsValue).getTime() : 0;
     if (!Number.isFinite(ts)) return false;
     const hours = windowHours();
+    if (hours === null) return true;
     const cutoff = Date.now() - hours * 60 * 60 * 1000;
     return ts >= cutoff;
   }
@@ -838,9 +871,13 @@
 
   function renderSummaryBar() {
     if (!summaryTotal || !summaryTopType || !summaryAgency || !summaryStatus) return;
-    const stats = state.lastSixHourStats;
+    const stats = state.summaryStats;
     const fallbackStats = state.stats;
     const total = stats?.total_incidents ?? fallbackStats?.total;
+
+    if (summaryWindow) summaryWindow.textContent = windowChipLabel();
+    if (summaryWindowHint) summaryWindowHint.textContent = windowHintLabel();
+
     summaryTotal.textContent = total !== undefined ? Number(total || 0).toLocaleString() : '—';
 
     const typeEntry =
@@ -957,14 +994,14 @@
     }
   }
 
-  async function fetchSixHourStats() {
+  async function fetchSummaryStats() {
     try {
-      const res = await fetch('/api/stats/last6h');
+      const res = await fetch(`/api/stats/last6h?window=${encodeURIComponent(state.window)}`);
       if (!res.ok) {
-        throw new Error('failed to load six-hour stats');
+        throw new Error('failed to load summary stats');
       }
       const payload = await res.json();
-      state.lastSixHourStats = payload || null;
+      state.summaryStats = payload || null;
       state.mapboxToken = payload?.mapbox_token || state.mapboxToken;
       renderSummaryBar();
     } catch (err) {
@@ -1034,7 +1071,7 @@
   });
   refreshBtn.addEventListener('click', () => {
     fetchCalls();
-    fetchSixHourStats();
+    fetchSummaryStats();
   });
   regenBtn.addEventListener('click', regenerate);
   playBtn.addEventListener('click', () => {
@@ -1088,6 +1125,6 @@
   bindSuggestions();
   initializeTheme();
   syncMapLayerButtons();
-  fetchSixHourStats();
+  fetchSummaryStats();
   fetchCalls();
 })();
