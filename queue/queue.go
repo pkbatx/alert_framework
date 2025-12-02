@@ -33,6 +33,7 @@ type Queue struct {
 	mu          sync.RWMutex
 	wg          sync.WaitGroup
 	metrics     *metrics.Metrics
+	enqueued    map[string]struct{}
 }
 
 // New creates a new Queue with the provided capacity, worker count, and per-job timeout.
@@ -42,6 +43,7 @@ func New(capacity, workerCount int, timeout time.Duration, m *metrics.Metrics) *
 		workerCount: workerCount,
 		timeout:     timeout,
 		metrics:     m,
+		enqueued:    make(map[string]struct{}),
 	}
 }
 
@@ -88,19 +90,31 @@ func (q *Queue) EnqueueWithRetry(ctx context.Context, j Job, window time.Duratio
 }
 
 func (q *Queue) tryEnqueue(j Job, logDrop bool) bool {
-	q.mu.RLock()
+	q.mu.Lock()
 	started := q.started
-	q.mu.RUnlock()
 	if !started {
+		q.mu.Unlock()
 		if logDrop {
 			log.Printf("enqueue called before queue started for job %s", j.ID)
 		}
 		return false
 	}
+	if _, exists := q.enqueued[j.ID]; exists {
+		q.mu.Unlock()
+		if logDrop {
+			log.Printf("duplicate job %s ignored", j.ID)
+		}
+		return false
+	}
+	q.enqueued[j.ID] = struct{}{}
+	q.mu.Unlock()
 	select {
 	case q.jobs <- j:
 		return true
 	default:
+		q.mu.Lock()
+		delete(q.enqueued, j.ID)
+		q.mu.Unlock()
 		if logDrop {
 			log.Printf("job queue full, dropping job %s", j.ID)
 		}
@@ -157,6 +171,9 @@ func (q *Queue) worker(ctx context.Context) {
 			if !ok {
 				return
 			}
+			q.mu.Lock()
+			delete(q.enqueued, j.ID)
+			q.mu.Unlock()
 			q.handleJob(ctx, j)
 		}
 	}

@@ -484,13 +484,6 @@
     await refreshSelected(call.filename);
   }
 
-  const baseChartLayout = {
-    margin: { t: 10, l: 30, r: 10, b: 30 },
-    paper_bgcolor: 'transparent',
-    plot_bgcolor: 'transparent',
-    font: { color: '#e8eeff' },
-  };
-
   function callsWithinMinutes(calls, minutes) {
     if (!Number.isFinite(minutes) || minutes <= 0) return [];
     const cutoff = Date.now() - minutes * 60 * 1000;
@@ -502,22 +495,18 @@
     });
   }
 
-  function renderBarChart(targetId, labels, values, color, emptyLabel, onClick) {
-    const el = document.getElementById(targetId);
-    if (!labels.length || !values.length) {
-      if (el) {
-        el.innerHTML = `<p class="muted">${emptyLabel}</p>`;
-      }
-      Plotly.purge(targetId);
-      return;
-    }
-    Plotly.newPlot(targetId, [{ type: 'bar', x: labels, y: values, marker: { color } }], baseChartLayout, { displayModeBar: false });
-    if (onClick && el) {
-      el.on('plotly_click', (evt) => {
-        const label = evt?.points?.[0]?.x;
-        if (label) onClick(label);
-      });
-    }
+  function isRecentCompleted(call) {
+    if (!call || call.status !== 'done') return false;
+    if (call.duplicate_of) return false;
+    const tsValue = call.call_timestamp || call.created_at || call.updated_at;
+    const ts = tsValue ? new Date(tsValue).getTime() : 0;
+    if (!Number.isFinite(ts)) return false;
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    return ts >= cutoff;
+  }
+
+  function getInsightCalls(source = state.calls) {
+    return dedupeCalls(source).filter(isRecentCompleted);
   }
 
   function hasValidCoordinates(value) {
@@ -739,7 +728,7 @@
     if (!points.length) {
       state.mapGeoJSON = { type: 'FeatureCollection', features: [] };
       resetMapView();
-      setMapOverlay('No mappable locations', 'No calls with mappable locations for the current filters.');
+      setMapOverlay('No mappable locations', 'No completed calls with mapped locations in the last 24 hours.');
       refreshMapLayers();
       scheduleMapResize();
       return;
@@ -768,7 +757,7 @@
     }
 
     mapboxgl.accessToken = token;
-    const callsForMap = getVisibleCalls();
+    const callsForMap = getInsightCalls(getVisibleCalls());
 
     if (!state.map) {
       clearMapOverlay();
@@ -783,7 +772,7 @@
       state.map.addControl(new mapboxgl.ScaleControl({ maxWidth: 120, unit: 'imperial' }), 'bottom-right');
       state.map.on('load', () => {
         ensureMapSource();
-        updateMapMarkers(getVisibleCalls(), token);
+        updateMapMarkers(callsForMap, token);
         scheduleMapResize();
       });
     } else {
@@ -792,35 +781,6 @@
   }
 
   function applyStats() {
-    if (!state.stats) return;
-    const statusLabels = Object.keys(state.stats.status_counts || {});
-    const statusValues = statusLabels.map((key) => state.stats.status_counts[key]);
-    renderBarChart('status-chart', statusLabels, statusValues, '#7ce7ff', 'No calls yet.', (label) => {
-      state.status = label;
-      statusSelect.value = label;
-      fetchCalls();
-    });
-
-    const tagEntries = Object.entries(state.stats.tag_counts || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
-    renderBarChart('tag-chart', tagEntries.map((e) => e[0]), tagEntries.map((e) => e[1]), '#5ef5a4', 'Tags will appear once transcripts are ready.', (label) => {
-      toggleTag(label);
-    });
-
-    const agencyEntries = Object.entries(state.stats.agency_counts || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
-    renderBarChart('agency-chart', agencyEntries.map((e) => e[0]), agencyEntries.map((e) => e[1]), '#a5b6ff', 'Agencies populate once calls arrive.', (label) => {
-      agencySelect.value = label;
-      state.agency = label;
-      renderFilterChips();
-      renderList();
-    });
-
-    const townEntries = Object.entries(state.stats.town_counts || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
-    renderBarChart('town-chart', townEntries.map((e) => e[0]), townEntries.map((e) => e[1]), '#ffd166', 'No towns recognized yet.', (label) => {
-      state.search = label;
-      searchInput.value = label;
-      fetchCalls();
-    });
-
     renderMap();
     renderStories();
   }
@@ -828,9 +788,9 @@
   function renderStories() {
     if (!storyList) return;
     storyList.innerHTML = '';
+    const insightCalls = getInsightCalls(getVisibleCalls());
     const items = [];
-    const statusCounts = state.stats?.status_counts || {};
-    const active = (statusCounts.processing || 0) + (statusCounts.queued || 0);
+    const active = state.calls.filter((call) => ['processing', 'queued'].includes(call.status)).length;
     if (active) {
       items.push({
         emoji: '⚡',
@@ -838,7 +798,7 @@
       });
     }
 
-    const pastHour = callsWithinMinutes(state.calls, 60).length;
+    const pastHour = callsWithinMinutes(insightCalls, 60).length;
     if (pastHour) {
       items.push({ emoji: '📈', text: `${pastHour} call${pastHour === 1 ? '' : 's'} landed in the past hour.` });
     }
@@ -853,7 +813,7 @@
       items.push({ emoji: '🏷️', text: `Tag “${topTag[0]}” appears ${topTag[1]} time${topTag[1] === 1 ? '' : 's'}.` });
     }
 
-    const recent = getVisibleCalls()[0];
+    const recent = insightCalls[0];
     if (recent) {
       items.push({
         emoji: '🛰️',

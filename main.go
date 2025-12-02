@@ -689,7 +689,45 @@ func (s *server) queueJob(source, filename string, sendGroupMe bool, force bool,
 	return enqueued
 }
 
+func (s *server) shouldSkipEnqueue(filename string, force bool) (bool, string) {
+	if force {
+		return false, ""
+	}
+
+	if _, exists := s.running.Load(filename); exists {
+		return true, "job already scheduled"
+	}
+
+	existing, err := s.getTranscription(filename)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("failed to check existing transcription for %s: %v", filename, err)
+		return false, ""
+	}
+	if existing == nil {
+		return false, ""
+	}
+
+	switch existing.Status {
+	case statusDone:
+		return true, "transcription already completed"
+	case statusProcessing, statusQueued:
+		return true, "transcription already in progress"
+	}
+
+	if existing.DuplicateOf != nil && *existing.DuplicateOf != "" {
+		return true, "duplicate transcription detected"
+	}
+
+	return false, ""
+}
+
 func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) (bool, bool) {
+	if skip, reason := s.shouldSkipEnqueue(filename, force); skip {
+		if reason != "" {
+			log.Printf("skipping enqueue for %s: %s", filename, reason)
+		}
+		return false, false
+	}
 	if _, exists := s.running.LoadOrStore(filename, struct{}{}); exists && !force {
 		return false, false
 	}
@@ -1958,6 +1996,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 
 	filtered := make([]transcriptionResponse, 0, len(calls))
 	stats := callStats{StatusCounts: make(map[string]int), CallTypeCounts: make(map[string]int), TagCounts: make(map[string]int), AgencyCounts: make(map[string]int), TownCounts: make(map[string]int), AvailableWindow: windowName}
+	insightCutoff := time.Now().Add(-24 * time.Hour)
 
 	for _, call := range calls {
 		if call.CallTimestamp.Before(cutoff) {
@@ -1970,6 +2009,15 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		filtered = append(filtered, call)
+		if call.Status != statusDone {
+			continue
+		}
+		if call.CallTimestamp.Before(insightCutoff) {
+			continue
+		}
+		if call.DuplicateOf != nil && *call.DuplicateOf != "" {
+			continue
+		}
 		stats.Total++
 		stats.StatusCounts[call.Status]++
 		if call.CallType != nil {
@@ -2338,7 +2386,10 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 	}
 	tags = stripVolunteerTags(tags)
 
-	location := s.deriveLocation(t, meta)
+	var location *locationGuess
+	if t.Status == statusDone {
+		location = s.deriveLocation(t, meta)
+	}
 
 	return transcriptionResponse{
 		Filename:             t.Filename,
