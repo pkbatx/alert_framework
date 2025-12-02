@@ -412,6 +412,12 @@
 
   function renderPreview(call) {
     if (!previewImage || !previewLink) return;
+    previewImage.onerror = () => {
+      previewImage.classList.add('hidden');
+      previewImage.removeAttribute('src');
+      previewLink.classList.add('hidden');
+      previewLink.removeAttribute('href');
+    };
     if (call.preview_image) {
       const cacheBuster = ['processing', 'queued'].includes(call.status) ? `?t=${Date.now()}` : '';
       previewImage.src = `${call.preview_image}${cacheBuster}`;
@@ -470,7 +476,7 @@
 
   function renderMap() {
     if (!mapChart) return;
-    const callsForMap = callsWithinMinutes(state.calls, 60);
+    const callsForMap = getVisibleCalls();
     const points = callsForMap
       .filter((call) => call.location && Number.isFinite(call.location.latitude) && Number.isFinite(call.location.longitude))
       .map((call) => ({
@@ -486,7 +492,7 @@
     }
 
     if (!points.length) {
-      mapChart.innerHTML = '<p class="muted">No mappable calls from the last hour yet.</p>';
+      mapChart.innerHTML = '<p class="muted">No mappable calls in this view yet.</p>';
       Plotly.purge('map-chart');
       return;
     }

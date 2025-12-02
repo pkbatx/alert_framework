@@ -232,6 +232,7 @@ type processJob struct {
 	meta        formatting.CallMetadata
 	prettyTitle string
 	publicURL   string
+	baseURL     string
 }
 
 type TranscriptionOptions struct {
@@ -674,7 +675,7 @@ func (s *server) watch() {
 }
 
 func (s *server) handleNewFile(filename string) {
-	meta, pretty, publicURL := s.buildJobContext(filename)
+	meta, pretty, publicURL, _ := s.buildJobContext(filename)
 	text := formatting.BuildAlertMessage(meta, pretty, publicURL)
 	if err := s.sendGroupMe(text); err != nil {
 		log.Printf("groupme send failed: %v", err)
@@ -692,7 +693,7 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 	if _, exists := s.running.LoadOrStore(filename, struct{}{}); exists && !force {
 		return false, false
 	}
-	meta, pretty, publicURL := s.buildJobContext(filename)
+	meta, pretty, publicURL, baseURL := s.buildJobContext(filename)
 	sourcePath := filepath.Join(s.cfg.CallsDir, filename)
 	if err := s.markQueued(filename, sourcePath, source, 0, opts, meta.DateTime); err != nil {
 		log.Printf("mark queued failed for %s: %v", filename, err)
@@ -702,7 +703,7 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 		FileName: filename,
 		Source:   source,
 		Work: func(ctx context.Context) error {
-			return s.processFile(ctx, processJob{filename: filename, source: source, sendGroupMe: sendGroupMe, force: force, options: opts, meta: meta, prettyTitle: pretty, publicURL: publicURL})
+			return s.processFile(ctx, processJob{filename: filename, source: source, sendGroupMe: sendGroupMe, force: force, options: opts, meta: meta, prettyTitle: pretty, publicURL: publicURL, baseURL: baseURL})
 		},
 		OnFinish: func(err error) {
 			s.running.Delete(filename)
@@ -717,22 +718,57 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 	return enqueued, dropped
 }
 
-func (s *server) buildJobContext(filename string) (formatting.CallMetadata, string, string) {
+func (s *server) buildJobContext(filename string) (formatting.CallMetadata, string, string, string) {
 	meta, err := formatting.ParseCallMetadataFromFilename(filename, s.tz)
 	if err != nil {
 		log.Printf("metadata parse failed for %s: %v", filename, err)
 		meta = formatting.CallMetadata{RawFileName: filename, DateTime: time.Now().In(s.tz)}
 	}
 	pretty := formatting.FormatPrettyTitle(filename, meta.DateTime, s.tz)
-	return meta, pretty, s.publicURL(filename)
+	base := s.resolveBaseURL(nil)
+	return meta, pretty, s.publicURL(base, filename), base
 }
 
-func (s *server) publicURL(filename string) string {
-	return fmt.Sprintf("https://ui.sussexcountyalerts.com/%s", url.PathEscape(filename))
+func (s *server) resolveBaseURL(r *http.Request) string {
+	if base := strings.TrimSpace(s.cfg.PublicBaseURL); base != "" {
+		return strings.TrimRight(base, "/")
+	}
+
+	if r != nil {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwarded != "" {
+			scheme = forwarded
+		}
+		host := strings.TrimSpace(r.Host)
+		if host != "" {
+			return fmt.Sprintf("%s://%s", scheme, host)
+		}
+	}
+
+	if strings.TrimSpace(s.cfg.HTTPPort) != "" {
+		return fmt.Sprintf("http://localhost%s", s.cfg.HTTPPort)
+	}
+
+	return "https://ui.sussexcountyalerts.com"
 }
 
-func (s *server) previewURL(filename string) string {
-	return fmt.Sprintf("https://ui.sussexcountyalerts.com/preview/%s.png", url.PathEscape(filename))
+func (s *server) publicURL(base, filename string) string {
+	base = strings.TrimRight(base, "/")
+	if base == "" {
+		base = "https://ui.sussexcountyalerts.com"
+	}
+	return fmt.Sprintf("%s/%s", base, url.PathEscape(filename))
+}
+
+func (s *server) previewURL(base, filename string) string {
+	base = strings.TrimRight(base, "/")
+	if base == "" {
+		base = "https://ui.sussexcountyalerts.com"
+	}
+	return fmt.Sprintf("%s/preview/%s.png", base, url.PathEscape(filename))
 }
 
 func (s *server) processFile(ctx context.Context, j processJob) error {
@@ -1731,12 +1767,13 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if existing != nil {
+		base := s.resolveBaseURL(r)
 		switch existing.Status {
 		case statusDone:
-			respondJSON(w, s.toResponse(*existing))
+			respondJSON(w, s.toResponse(*existing, base))
 			return
 		case statusProcessing:
-			respondJSON(w, s.toResponse(*existing))
+			respondJSON(w, s.toResponse(*existing, base))
 			return
 		case statusError:
 			s.queueJob("api", cleaned, false, true, opts)
@@ -1856,6 +1893,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	baseURL := s.resolveBaseURL(r)
 	search := strings.TrimSpace(r.URL.Query().Get("q"))
 	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
 	callTypeFilter := strings.TrimSpace(r.URL.Query().Get("call_type"))
@@ -1915,7 +1953,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		calls = append(calls, s.toResponse(t))
+		calls = append(calls, s.toResponse(t, baseURL))
 	}
 
 	filtered := make([]transcriptionResponse, 0, len(calls))
@@ -2271,7 +2309,7 @@ func (s *server) buildSegments(t transcription) []transcriptSegment {
 	return fallbackSegmentsFromTranscript(transcriptText, t.DurationSeconds)
 }
 
-func (s *server) toResponse(t transcription) transcriptionResponse {
+func (s *server) toResponse(t transcription, baseURL string) transcriptionResponse {
 	meta, err := formatting.ParseCallMetadataFromFilename(t.Filename, s.tz)
 	if err != nil {
 		meta = formatting.CallMetadata{RawFileName: t.Filename, DateTime: t.UpdatedAt.In(s.tz)}
@@ -2330,8 +2368,8 @@ func (s *server) toResponse(t transcription) transcriptionResponse {
 		PrettyTitle:          pretty,
 		Town:                 meta.TownDisplay,
 		Agency:               meta.AgencyDisplay,
-		AudioURL:             s.publicURL(t.Filename),
-		PreviewImage:         s.previewURL(t.Filename),
+		AudioURL:             s.publicURL(baseURL, t.Filename),
+		PreviewImage:         s.previewURL(baseURL, t.Filename),
 		Tags:                 tags,
 		Segments:             s.buildSegments(t),
 		Location:             location,
@@ -2790,7 +2828,7 @@ func (s *server) fireWebhooks(j processJob) error {
 		"local_datetime": alertTime.In(s.tz).Format("2006-01-02 15:04:05"),
 		"filename":       t.Filename,
 		"url":            j.publicURL,
-		"preview_image":  s.previewURL(t.Filename),
+		"preview_image":  s.previewURL(j.baseURL, t.Filename),
 		"pretty_title":   j.prettyTitle,
 		"alert_message":  formatting.BuildAlertMessage(j.meta, j.prettyTitle, j.publicURL),
 		"metadata": map[string]interface{}{
