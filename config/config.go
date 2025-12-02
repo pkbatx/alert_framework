@@ -11,18 +11,20 @@ import (
 
 // Config holds service configuration derived from environment variables.
 type Config struct {
-	HTTPPort      string
-	CallsDir      string
-	JobQueueSize  int
-	WorkerCount   int
-	JobTimeoutSec int
-	GroupMeBotID  string
-	GroupMeToken  string
-	WorkDir       string
-	DBPath        string
-	DevUI         bool
-	MapboxToken   string
-	PublicBaseURL string
+	HTTPPort           string
+	CallsDir           string
+	JobQueueSize       int
+	WorkerCount        int
+	JobTimeoutSec      int
+	GroupMeBotID       string
+	GroupMeToken       string
+	WorkDir            string
+	DBPath             string
+	DevUI              bool
+	MapboxToken        string
+	PublicBaseURL      string
+	AudioFilterEnabled bool
+	FFMPEGBin          string
 }
 
 const (
@@ -40,18 +42,20 @@ const (
 // Load reads configuration from environment variables and applies sane defaults.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPPort:      getEnv("HTTP_PORT", defaultPort),
-		CallsDir:      getEnv("CALLS_DIR", defaultCallsDir),
-		JobQueueSize:  defaultQueueSize,
-		WorkerCount:   defaultWorkerCount,
-		JobTimeoutSec: defaultJobTimeoutSec,
-		GroupMeBotID:  os.Getenv("GROUPME_BOT_ID"),
-		GroupMeToken:  os.Getenv("GROUPME_ACCESS_TOKEN"),
-		WorkDir:       getEnv("WORK_DIR", defaultWorkDir),
-		DBPath:        getEnv("DB_PATH", defaultDBPath),
-		DevUI:         parseBoolEnv("DEV_UI"),
-		MapboxToken:   os.Getenv("MAPBOX_TOKEN"),
-		PublicBaseURL: strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
+		HTTPPort:           getEnv("HTTP_PORT", defaultPort),
+		CallsDir:           getEnv("CALLS_DIR", defaultCallsDir),
+		JobQueueSize:       defaultQueueSize,
+		WorkerCount:        defaultWorkerCount,
+		JobTimeoutSec:      defaultJobTimeoutSec,
+		GroupMeBotID:       os.Getenv("GROUPME_BOT_ID"),
+		GroupMeToken:       os.Getenv("GROUPME_ACCESS_TOKEN"),
+		WorkDir:            getEnv("WORK_DIR", defaultWorkDir),
+		DBPath:             getEnv("DB_PATH", defaultDBPath),
+		DevUI:              parseBoolEnv("DEV_UI"),
+		MapboxToken:        os.Getenv("MAPBOX_TOKEN"),
+		PublicBaseURL:      strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
+		AudioFilterEnabled: parseBoolEnvDefault("AUDIO_FILTER_ENABLED", true),
+		FFMPEGBin:          getEnv("FFMPEG_BIN", "ffmpeg"),
 	}
 	if os.Getenv("DB_PATH") == "" {
 		cfg.DBPath = filepath.Join(cfg.WorkDir, filepath.Base(defaultDBPath))
@@ -133,4 +137,12 @@ func parseBoolEnv(key string) bool {
 		return true
 	}
 	return false
+}
+
+func parseBoolEnvDefault(key string, defaultVal bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultVal
+	}
+	return parseBoolEnv(key)
 }
