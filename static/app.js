@@ -45,11 +45,15 @@
     segments: [],
     mapboxToken: '',
     map: null,
-    mapLayer: null,
-    mapTile: null,
+    mapMarkers: [],
+    geocodeCache: new Map(),
     pollTimer: null,
     inlineAudio: null,
+    mapResizeTimer: null,
   };
+
+  const MAP_DEFAULT_CENTER = [-74.696, 41.05];
+  const MAP_DEFAULT_ZOOM = 8;
 
   function setWindow(next) {
     state.window = next;
@@ -477,91 +481,190 @@
     }
   }
 
-  function renderMap() {
+  function hasValidCoordinates(value) {
+    return value && Number.isFinite(value.lat) && Number.isFinite(value.lon);
+  }
+
+  function extractCoordinates(call) {
+    if (call.location && Number.isFinite(call.location.latitude) && Number.isFinite(call.location.longitude)) {
+      return { lat: Number(call.location.latitude), lon: Number(call.location.longitude) };
+    }
+    return null;
+  }
+
+  function buildGeocodeQuery(call) {
+    const locationLabel = (call.location && call.location.label) || '';
+    if (typeof locationLabel === 'string' && locationLabel.trim()) {
+      return locationLabel.trim();
+    }
+    const town = (call.town || '').trim();
+    if (town) return `${town}, NJ`;
+    const agency = (call.agency || '').trim();
+    if (agency) return `${agency}, Sussex County, NJ`;
+    const fallback = (call.pretty_title || call.filename || '').replace(/_/g, ' ').trim();
+    if (fallback) return `${fallback}, Sussex County, NJ`;
+    return '';
+  }
+
+  async function geocodeQuery(query, token, warnState) {
+    if (!query || !token) return null;
+    if (state.geocodeCache.has(query)) return state.geocodeCache.get(query);
+    const encoded = encodeURIComponent(query);
+    const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json?access_token=${token}&limit=1`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const coords = data?.features?.[0]?.center;
+      if (Array.isArray(coords) && Number.isFinite(coords[0]) && Number.isFinite(coords[1])) {
+        const resolved = { lon: coords[0], lat: coords[1] };
+        state.geocodeCache.set(query, resolved);
+        return resolved;
+      }
+      state.geocodeCache.set(query, null);
+      return null;
+    } catch (err) {
+      if (!warnState.logged) {
+        console.warn('Mapbox geocoding failed', err);
+        warnState.logged = true;
+      }
+      state.geocodeCache.set(query, null);
+      return null;
+    }
+  }
+
+  function clearMapMarkers() {
+    state.mapMarkers.forEach((marker) => marker.remove());
+    state.mapMarkers = [];
+  }
+
+  function destroyMapInstance() {
+    clearMapMarkers();
+    if (state.map) {
+      state.map.remove();
+      state.map = null;
+    }
+  }
+
+  function showMapUnavailable(title, message) {
+    destroyMapInstance();
     if (!mapChart) return;
-    if (typeof L === 'undefined') {
-      mapChart.innerHTML = '<div class="map-empty"><div><h4>Map unavailable</h4><p class="muted">Map library failed to load. Please refresh.</p></div></div>';
-      return;
+    mapChart.innerHTML = `<div class="map-empty"><div><h4>${title}</h4><p class="muted">${message}</p></div></div>`;
+  }
+
+  function setMapOverlay(title, message) {
+    if (!mapChart) return;
+    let overlay = mapChart.querySelector('.map-empty');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'map-empty';
+      mapChart.appendChild(overlay);
     }
+    overlay.innerHTML = `<div><p class="eyebrow">Geography</p><h4>${title}</h4><p class="muted">${message}</p></div>`;
+  }
 
-    const { url: tileUrl, attribution } = (function resolveTileLayer() {
-      const token = state.mapboxToken && state.mapboxToken.trim();
-      if (token) {
-        return {
-          url: `https://api.mapbox.com/styles/v1/mapbox/dark-v11/tiles/256/{z}/{x}/{y}{r}?access_token=${token}`,
-          attribution: '© Mapbox © OpenStreetMap contributors',
-        };
-      }
-      return {
-        url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        attribution: '© OpenStreetMap contributors, © CARTO',
-      };
-    })();
+  function clearMapOverlay() {
+    const overlay = mapChart?.querySelector('.map-empty');
+    if (overlay) overlay.remove();
+  }
 
-    const callsForMap = getVisibleCalls();
-    const points = callsForMap
-      .filter((call) => call.location && Number.isFinite(call.location.latitude) && Number.isFinite(call.location.longitude))
-      .map((call) => ({
-        lat: call.location.latitude,
-        lon: call.location.longitude,
-        label: call.location.label || call.pretty_title || call.filename,
-      }));
-
-    if (!points.length) {
+  function scheduleMapResize() {
+    if (!state.map) return;
+    if (state.mapResizeTimer) clearTimeout(state.mapResizeTimer);
+    state.mapResizeTimer = setTimeout(() => {
       if (state.map) {
-        state.map.remove();
-        state.map = null;
-        state.mapLayer = null;
-        state.mapTile = null;
+        state.map.resize();
       }
-      mapChart.innerHTML = '<div class="map-empty"><div><p class="eyebrow">Geography</p><h4>No mappable calls yet</h4><p class="muted">We\'ll place pins as soon as addresses are recognized.</p></div></div>';
+    }, 180);
+  }
+
+  function resetMapView() {
+    if (!state.map) return;
+    state.map.setCenter(MAP_DEFAULT_CENTER);
+    state.map.setZoom(MAP_DEFAULT_ZOOM);
+  }
+
+  async function updateMapMarkers(calls, token) {
+    if (!state.map) return;
+    const warnState = { logged: false };
+    const points = [];
+    for (const call of calls) {
+      let coords = extractCoordinates(call);
+      if (!coords) {
+        const query = buildGeocodeQuery(call);
+        coords = await geocodeQuery(query, token, warnState);
+      }
+      if (!hasValidCoordinates(coords)) continue;
+      points.push({ call, ...coords });
+    }
+
+    clearMapMarkers();
+    if (!points.length) {
+      resetMapView();
+      setMapOverlay('No mappable locations', 'No calls with mappable locations for the current filters.');
+      scheduleMapResize();
       return;
     }
 
-    if (!state.map) {
-      mapChart.innerHTML = '';
-      state.map = L.map('map-chart', { zoomControl: false, attributionControl: false });
-      state.mapTile = L.tileLayer(tileUrl, { attribution, maxZoom: 19 }).addTo(state.map);
-      state.mapLayer = L.layerGroup().addTo(state.map);
-      L.control.attribution({ prefix: '' }).addTo(state.map);
-    } else {
-      if (state.mapTile) {
-        state.mapTile.setUrl(tileUrl);
-      }
-      if (state.mapLayer) {
-        state.mapLayer.clearLayers();
-      }
-    }
-
-    let badge = mapChart.querySelector('.map-badge');
-    if (!badge) {
-      badge = document.createElement('div');
-      badge.className = 'map-badge';
-      mapChart.appendChild(badge);
-    }
-    badge.innerHTML = `<strong>${points.length} ${points.length === 1 ? 'pin' : 'pins'}</strong><span>${state.mapboxToken ? 'Mapbox tiles enabled' : 'Using open map tiles'}</span>`;
-
+    clearMapOverlay();
+    const bounds = new mapboxgl.LngLatBounds();
     points.forEach((point) => {
-      const marker = L.circleMarker([point.lat, point.lon], {
-        radius: 9,
-        color: '#7ce7ff',
-        weight: 2,
-        fillColor: '#7ce7ff',
-        fillOpacity: 0.8,
-      }).bindTooltip(point.label, { direction: 'top', offset: [0, -4] });
-
-      if (state.mapLayer) {
-        state.mapLayer.addLayer(marker);
-      } else {
-        marker.addTo(state.map);
-      }
+      const popupHtml = `
+        <div>
+          <strong>${callSummary(point.call)}</strong>
+          <div class="muted">${formatDate(point.call.call_timestamp)}</div>
+          <div class="muted">${point.call.town || point.call.agency || 'Unknown area'}</div>
+        </div>`;
+      const popup = new mapboxgl.Popup({ offset: 12 }).setHTML(popupHtml);
+      const marker = new mapboxgl.Marker({ color: '#7ce7ff' }).setLngLat([point.lon, point.lat]).setPopup(popup).addTo(state.map);
+      state.mapMarkers.push(marker);
+      bounds.extend([point.lon, point.lat]);
     });
 
-    const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon]));
-    if (bounds.isValid()) {
-      state.map.fitBounds(bounds, { padding: [32, 32], maxZoom: 12 });
+    if (!bounds.isEmpty()) {
+      state.map.fitBounds(bounds, { padding: 48, maxZoom: 13 });
+    } else {
+      resetMapView();
     }
-    state.map.invalidateSize();
+    scheduleMapResize();
+  }
+
+  async function renderMap() {
+    if (typeof window === 'undefined' || !mapChart) return;
+    const token = (state.mapboxToken || '').trim();
+    if (!token) {
+      showMapUnavailable(
+        'Map unavailable: MAPBOX_TOKEN not configured.',
+        'Configure a valid Mapbox access token to enable geography insights.'
+      );
+      return;
+    }
+    if (typeof mapboxgl === 'undefined') {
+      showMapUnavailable('Map unavailable', 'Map library failed to load. Please refresh.');
+      return;
+    }
+
+    mapboxgl.accessToken = token;
+    const callsForMap = getVisibleCalls();
+
+    if (!state.map) {
+      clearMapOverlay();
+      mapChart.innerHTML = '';
+      state.map = new mapboxgl.Map({
+        container: 'map-chart',
+        style: 'mapbox://styles/mapbox/dark-v11',
+        center: MAP_DEFAULT_CENTER,
+        zoom: MAP_DEFAULT_ZOOM,
+      });
+      state.map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+      state.map.addControl(new mapboxgl.ScaleControl({ maxWidth: 120, unit: 'imperial' }), 'bottom-right');
+      state.map.on('load', () => {
+        updateMapMarkers(getVisibleCalls(), token);
+        scheduleMapResize();
+      });
+    } else {
+      updateMapMarkers(callsForMap, token);
+    }
   }
 
   function applyStats() {
@@ -776,7 +879,13 @@
   toggleInsightsBtn.addEventListener('click', () => {
     const collapsed = insightsBody.classList.toggle('collapsed');
     toggleInsightsBtn.textContent = collapsed ? 'Expand' : 'Collapse';
+    if (!collapsed) {
+      scheduleMapResize();
+      setTimeout(scheduleMapResize, 250);
+    }
   });
+
+  window.addEventListener('resize', scheduleMapResize);
 
   fetchCalls();
 })();
