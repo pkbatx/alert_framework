@@ -20,65 +20,33 @@
       </div>
       <div class="nav-actions">
         <div class="window-switcher" role="group" aria-label="Time window">
-          <button data-window="24h" class="active">Last 24h</button>
-          <button data-window="7d">Last 7d</button>
-          <button data-window="30d">Last 30d</button>
+          <button data-window="6h" class="active">Last 6h</button>
         </div>
         <button id="theme-toggle" class="ghost" type="button" aria-label="Toggle theme">🌙 Dark</button>
       </div>
     </div>
 
-    <section class="dispatch-shell" aria-label="Live dispatch console">
-      <div class="console-header">
-        <div class="console-title">
-          <p class="eyebrow">Situational awareness</p>
-          <h1>CAD-style command console</h1>
-          <p class="muted">One glance for live incidents, queue health, and field context across the county.</p>
-          <div class="module-pills" role="group" aria-label="Key modules">
-            <button class="pill live" type="button">Live monitor</button>
-            <button class="pill" type="button">Incident log</button>
-            <button class="pill" type="button">Push status</button>
-            <button class="pill" type="button">Open incidents</button>
-            <button class="pill" type="button">On-shift focus</button>
-            <button class="pill" type="button">Queue health</button>
-            <button class="pill" type="button">Jobs + transcripts</button>
-            <button class="pill" type="button">Audio + map</button>
-            <button class="pill calm" type="button">Soft monitoring</button>
-          </div>
-        </div>
-        <div class="console-actions" role="group" aria-label="Console controls">
-          <div class="action-chip">Live monitor</div>
-          <div class="action-chip calm">Quiet scan</div>
-          <button class="ghost" type="button">Incident log</button>
-          <button class="ghost" type="button">Push status</button>
-        </div>
+    <section class="summary-bar" aria-label="Six-hour overview">
+      <div class="summary-chip">Last 6h</div>
+      <div class="summary-metric">
+        <p class="eyebrow">Total incidents</p>
+        <strong id="summary-total">—</strong>
+        <span class="muted">Past six hours</span>
       </div>
-
-      <div class="status-grid" role="list">
-        <article class="status-card" role="listitem">
-          <div class="status-top">
-            <p class="eyebrow">Open incidents</p>
-            <span class="status-dot active" aria-hidden="true"></span>
-          </div>
-          <h3>On-shift focus</h3>
-          <p class="muted">Sort by newest, severity, or status to triage without leaving the pane.</p>
-        </article>
-        <article class="status-card" role="listitem">
-          <div class="status-top">
-            <p class="eyebrow">Queue health</p>
-            <span class="status-dot caution" aria-hidden="true"></span>
-          </div>
-          <h3>Jobs + transcripts</h3>
-          <p class="muted">Watch ingest, regen, and processing state in realtime—no refresh needed.</p>
-        </article>
-        <article class="status-card" role="listitem">
-          <div class="status-top">
-            <p class="eyebrow">Audio + map</p>
-            <span class="status-dot calm" aria-hidden="true"></span>
-          </div>
-          <h3>Soft monitoring</h3>
-          <p class="muted">Listen, skim the waveform, and pin density vs. points to keep spatial bearings.</p>
-        </article>
+      <div class="summary-metric">
+        <p class="eyebrow">Top type</p>
+        <strong id="summary-top-type">—</strong>
+        <span class="muted">Most frequent incident</span>
+      </div>
+      <div class="summary-metric">
+        <p class="eyebrow">Busiest agency</p>
+        <strong id="summary-agency">—</strong>
+        <span class="muted">Calls handled</span>
+      </div>
+      <div class="summary-metric">
+        <p class="eyebrow">Queue vs. completed</p>
+        <strong id="summary-status">—</strong>
+        <span class="muted">Live job balance</span>
       </div>
     </section>
 
@@ -230,29 +198,6 @@
               <span id="updated-at" class="muted"></span>
             </div>
             <div id="transcript-text" class="transcript-text">Pick a call to read the transcript.</div>
-          </div>
-        </div>
-      </section>
-
-    <section class="panel insights-panel">
-      <div class="panel-header">
-        <div>
-          <p class="eyebrow">Highlights</p>
-          <h2>Quick stats</h2>
-            <p class="muted">Insights only include completed, non-duplicate transcriptions from the past day.</p>
-          </div>
-          <button id="toggle-insights" class="ghost" type="button">Collapse</button>
-        </div>
-        <div id="insights-body">
-          <div class="story-card">
-            <div class="story-header">
-              <div>
-                <p class="eyebrow">Narrative highlights</p>
-                <h3>What matters now</h3>
-              </div>
-              <span class="muted">Auto-updates with the data you see</span>
-            </div>
-            <ul id="story-list" class="story-list"></ul>
           </div>
         </div>
       </section>

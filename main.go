@@ -220,6 +220,23 @@ type callStats struct {
 	AvailableWindow string         `json:"window"`
 }
 
+type hourlyCount struct {
+	Hour  string `json:"hour"`
+	Count int    `json:"count"`
+}
+
+type lastSixHourStatsResponse struct {
+	TotalIncidents   int                     `json:"total_incidents"`
+	ByType           map[string]int          `json:"by_type"`
+	ByAgency         map[string]int          `json:"by_agency"`
+	ByStatus         map[string]int          `json:"by_status"`
+	TopIncidentTypes []tagCount              `json:"top_incident_types"`
+	TopAgencies      []tagCount              `json:"top_agencies"`
+	IncidentsPerHour []hourlyCount           `json:"incidents_per_hour"`
+	Calls            []transcriptionResponse `json:"calls"`
+	MapboxToken      string                  `json:"mapbox_token,omitempty"`
+}
+
 type callListResponse struct {
 	Window      string                  `json:"window"`
 	Calls       []transcriptionResponse `json:"calls"`
@@ -347,6 +364,7 @@ func main() {
 	mux.HandleFunc("/api/transcription/", s.handleTranscription)
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/stats/last6h", s.handleLastSixHoursStats)
 	mux.HandleFunc("/preview/", s.handlePreview)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
@@ -1989,6 +2007,92 @@ func (s *server) handleSimilar(w http.ResponseWriter, r *http.Request, filename 
 	respondJSON(w, sims)
 }
 
+func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cutoff := time.Now().UTC().Add(-6 * time.Hour)
+	baseURL := s.resolveBaseURL(r)
+
+	query := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions WHERE COALESCE(call_timestamp, created_at) >= ? ORDER BY COALESCE(call_timestamp, created_at) DESC LIMIT 500`
+
+	rows, err := queryWithRetry(s.db, query, cutoff)
+	if err != nil {
+		log.Printf("stats query failed: %v", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	bucketStart := time.Now().UTC().Truncate(time.Hour).Add(-5 * time.Hour)
+	hourlyTemplate := make([]hourlyCount, 0, 6)
+	hourlyCounts := make(map[string]int, 6)
+	for i := 0; i < 6; i++ {
+		ts := bucketStart.Add(time.Duration(i) * time.Hour)
+		label := ts.Format("15:04")
+		hourlyTemplate = append(hourlyTemplate, hourlyCount{Hour: label})
+		hourlyCounts[label] = 0
+	}
+
+	stats := lastSixHourStatsResponse{
+		ByType:   make(map[string]int),
+		ByAgency: make(map[string]int),
+		ByStatus: make(map[string]int),
+	}
+
+	var calls []transcriptionResponse
+	for rows.Next() {
+		var t transcription
+		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		call := s.toResponse(t, baseURL)
+		callTime := call.CallTimestamp.UTC()
+		if callTime.Before(cutoff) {
+			continue
+		}
+
+		calls = append(calls, call)
+
+		if call.DuplicateOf != nil && *call.DuplicateOf != "" {
+			continue
+		}
+
+		stats.TotalIncidents++
+		stats.ByStatus[call.Status]++
+		if call.CallType != nil {
+			stats.ByType[strings.ToLower(*call.CallType)]++
+		}
+		if call.Agency != "" {
+			stats.ByAgency[strings.ToLower(call.Agency)]++
+		}
+		bucketKey := callTime.Truncate(time.Hour).Format("15:04")
+		if _, ok := hourlyCounts[bucketKey]; ok {
+			hourlyCounts[bucketKey]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("stats rows error: %v", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	for i, bucket := range hourlyTemplate {
+		hourlyTemplate[i].Count = hourlyCounts[bucket.Hour]
+	}
+
+	stats.TopIncidentTypes = topCounts(stats.ByType, 3)
+	stats.TopAgencies = topCounts(stats.ByAgency, 3)
+	stats.IncidentsPerHour = hourlyTemplate
+	stats.Calls = calls
+	stats.MapboxToken = s.cfg.MapboxToken
+
+	respondJSON(w, stats)
+}
+
 func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2002,10 +2106,16 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 
 	windowName := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("window")))
 	if windowName == "" {
+		windowName = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("range")))
+	}
+	if windowName == "" {
 		windowName = "24h"
 	}
 	windowDuration := 24 * time.Hour
 	switch windowName {
+	case "6h", "6hr", "6hrs", "6hours":
+		windowDuration = 6 * time.Hour
+		windowName = "6h"
 	case "7d", "7days", "week":
 		windowDuration = 7 * 24 * time.Hour
 		windowName = "7d"
@@ -2016,7 +2126,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 		windowName = "24h"
 	}
 
-	cutoff := time.Now().Add(-windowDuration)
+	cutoff := time.Now().UTC().Add(-windowDuration)
 
 	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
 	where := []string{"COALESCE(call_timestamp, created_at) >= ?"}
@@ -2059,7 +2169,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 
 	filtered := make([]transcriptionResponse, 0, len(calls))
 	stats := callStats{StatusCounts: make(map[string]int), CallTypeCounts: make(map[string]int), TagCounts: make(map[string]int), AgencyCounts: make(map[string]int), TownCounts: make(map[string]int), AvailableWindow: windowName}
-	insightCutoff := time.Now().Add(-24 * time.Hour)
+	insightCutoff := cutoff
 
 	for _, call := range calls {
 		if call.CallTimestamp.Before(cutoff) {
@@ -2142,6 +2252,18 @@ func hasTags(values []string, required []string) bool {
 		}
 	}
 	return true
+}
+
+func topCounts(counts map[string]int, limit int) []tagCount {
+	entries := make([]tagCount, 0, len(counts))
+	for key, value := range counts {
+		entries = append(entries, tagCount{Tag: key, Count: value})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Count > entries[j].Count })
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries
 }
 
 func parseRecognizedTownList(raw *string) []string {
