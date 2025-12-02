@@ -30,10 +30,14 @@
   const themeToggle = document.getElementById('theme-toggle');
   const toggleAdvancedBtn = document.getElementById('toggle-advanced');
   const advancedFilters = document.getElementById('advanced-filters');
+  const filtersDrawer = document.getElementById('filters-drawer');
+  const filtersOverlay = document.getElementById('filters-overlay');
+  const closeFiltersBtn = document.getElementById('close-filters');
   const mapLayerDensity = document.getElementById('map-layer-density');
   const mapLayerPoints = document.getElementById('map-layer-points');
   const storyList = document.getElementById('story-list');
   const themeColorMeta = document.getElementById('theme-color-meta');
+  const suggestionList = document.getElementById('search-suggestions');
 
   const state = {
     window: '24h',
@@ -86,10 +90,27 @@
     applyTheme(saved || (prefersDark ? 'dark' : 'light'));
   }
 
+  function openFilters() {
+    if (!filtersDrawer) return;
+    filtersDrawer.classList.add('open');
+    filtersDrawer.setAttribute('aria-hidden', 'false');
+    if (toggleAdvancedBtn) toggleAdvancedBtn.textContent = 'Hide filters';
+  }
+
+  function closeFilters() {
+    if (!filtersDrawer) return;
+    filtersDrawer.classList.remove('open');
+    filtersDrawer.setAttribute('aria-hidden', 'true');
+    if (toggleAdvancedBtn) toggleAdvancedBtn.textContent = 'Advanced filters';
+  }
+
   function toggleAdvancedFilters() {
-    if (!advancedFilters) return;
-    const collapsed = advancedFilters.classList.toggle('collapsed');
-    toggleAdvancedBtn.textContent = collapsed ? 'Advanced filters' : 'Hide advanced';
+    if (!filtersDrawer) return;
+    if (filtersDrawer.classList.contains('open')) {
+      closeFilters();
+    } else {
+      openFilters();
+    }
   }
 
   function setWindow(next) {
@@ -191,6 +212,19 @@
       state.tagFilter.push(normalized);
     }
     fetchCalls();
+  }
+
+  function bindSuggestions() {
+    if (!suggestionList) return;
+    const buttons = suggestionList.querySelectorAll('button[data-value]');
+    buttons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const value = btn.dataset.value || btn.textContent || '';
+        searchInput.value = value;
+        state.search = value;
+        fetchCalls();
+      });
+    });
   }
 
   function getVisibleCalls() {
@@ -1036,6 +1070,18 @@
     toggleAdvancedBtn.addEventListener('click', toggleAdvancedFilters);
   }
 
+  if (filtersOverlay) {
+    filtersOverlay.addEventListener('click', closeFilters);
+  }
+
+  if (closeFiltersBtn) {
+    closeFiltersBtn.addEventListener('click', closeFilters);
+  }
+
+  document.addEventListener('keydown', (evt) => {
+    if (evt.key === 'Escape') closeFilters();
+  });
+
   if (mapLayerDensity) {
     mapLayerDensity.addEventListener('click', () => setMapLayerVisibility('density', !state.mapLayerVisibility.density));
   }
@@ -1046,11 +1092,8 @@
 
   window.addEventListener('resize', scheduleMapResize);
 
-  if (advancedFilters) {
-    advancedFilters.classList.add('collapsed');
-    if (toggleAdvancedBtn) toggleAdvancedBtn.textContent = 'Advanced filters';
-  }
-
+  closeFilters();
+  bindSuggestions();
   initializeTheme();
   syncMapLayerButtons();
   fetchCalls();
