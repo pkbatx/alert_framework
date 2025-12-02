@@ -269,3 +269,17 @@ Any future features must:
 	•	Keep time windows limited to 24h, 7d, 30d.
 	•	Keep filtering/tag logic additive, not replacing metadata.
 	•	Keep helper scripts separate from the runtime service.
+
+⸻
+
+Agent: AudioPreprocessor
+
+Responsibilities
+        •       Insert a configurable ffmpeg-based preprocessing step between raw recordings and downstream use (UI playback and transcription).
+        •       Provide profiles (raw/default/aggressive) with tuned band-pass, hum notch filters, de-emphasis, noise reduction/expansion, compression, loudness normalization, and mono 16 kHz resampling suitable for narrowband FM voice.
+        •       Expose toggles so the UI and transcription pipeline can choose raw vs processed audio without breaking existing filenames or metadata parsing.
+
+Guarantees
+        •       Do not modify ingest → metadata → alert → DB → transcription lifecycle.
+        •       Preserve existing API contracts, GroupMe URLs, and file naming/paths; processed audio coexists alongside raw archives.
+        •       Make processing configurable via env/config files and gracefully fall back to raw audio on failure.
