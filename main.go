@@ -66,6 +66,10 @@ var (
 	allowedExtensions = map[string]struct{}{
 		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
 	}
+	sussexMinLat         = 40.9
+	sussexMaxLat         = 41.4
+	sussexMinLng         = -75.2
+	sussexMaxLng         = -74.3
 	sussexTowns          = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
 	warrenTowns          = []string{"Allamuchy", "Alpha", "Belvidere", "Blairstown", "Franklin", "Frelinghuysen", "Greenwich", "Hackettstown", "Hardwick", "Harmony", "Hope", "Independence", "Knowlton", "Liberty", "Lopatcong", "Mansfield", "Oxford", "Phillipsburg", "Pohatcong", "Washington Boro", "Washington Township", "White"}
 	defaultCleanupPrompt = buildCleanupPrompt()
@@ -94,6 +98,13 @@ func buildCountyLookup() map[string]string {
 		counties[strings.ToLower(town)] = "Warren"
 	}
 	return counties
+}
+
+func isWithinSussexCounty(lat, lng float64) bool {
+	if lat == 0 && lng == 0 {
+		return false
+	}
+	return lat >= sussexMinLat && lat <= sussexMaxLat && lng >= sussexMinLng && lng <= sussexMaxLng
 }
 
 // transcription statuses
@@ -235,6 +246,7 @@ type lastSixHourStatsResponse struct {
 	IncidentsPerHour []hourlyCount           `json:"incidents_per_hour"`
 	Calls            []transcriptionResponse `json:"calls"`
 	MapboxToken      string                  `json:"mapbox_token,omitempty"`
+	Window           string                  `json:"window"`
 }
 
 type callListResponse struct {
@@ -2013,12 +2025,21 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	cutoff := time.Now().UTC().Add(-6 * time.Hour)
+	rawWindow := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("window")))
+	windowName, windowDuration := normalizeWindowName(rawWindow, "6h")
+
 	baseURL := s.resolveBaseURL(r)
+	query := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
+	args := []interface{}{}
+	var cutoff time.Time
+	if windowDuration > 0 {
+		cutoff = time.Now().UTC().Add(-windowDuration)
+		query += " WHERE COALESCE(call_timestamp, created_at) >= ?"
+		args = append(args, cutoff)
+	}
+	query += " ORDER BY COALESCE(call_timestamp, created_at) DESC LIMIT 500"
 
-	query := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions WHERE COALESCE(call_timestamp, created_at) >= ? ORDER BY COALESCE(call_timestamp, created_at) DESC LIMIT 500`
-
-	rows, err := queryWithRetry(s.db, query, cutoff)
+	rows, err := queryWithRetry(s.db, query, args...)
 	if err != nil {
 		log.Printf("stats query failed: %v", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -2026,10 +2047,24 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 	}
 	defer rows.Close()
 
-	bucketStart := time.Now().UTC().Truncate(time.Hour).Add(-5 * time.Hour)
-	hourlyTemplate := make([]hourlyCount, 0, 6)
-	hourlyCounts := make(map[string]int, 6)
-	for i := 0; i < 6; i++ {
+	bucketCount := 6
+	if windowDuration > 0 {
+		hours := int(windowDuration.Hours())
+		if hours < 1 {
+			hours = 1
+		}
+		if hours > 72 {
+			hours = 72
+		}
+		bucketCount = hours
+	} else {
+		bucketCount = 24
+	}
+
+	bucketStart := time.Now().UTC().Truncate(time.Hour).Add(time.Duration(-(bucketCount - 1)) * time.Hour)
+	hourlyTemplate := make([]hourlyCount, 0, bucketCount)
+	hourlyCounts := make(map[string]int, bucketCount)
+	for i := 0; i < bucketCount; i++ {
 		ts := bucketStart.Add(time.Duration(i) * time.Hour)
 		label := ts.Format("15:04")
 		hourlyTemplate = append(hourlyTemplate, hourlyCount{Hour: label})
@@ -2040,6 +2075,7 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 		ByType:   make(map[string]int),
 		ByAgency: make(map[string]int),
 		ByStatus: make(map[string]int),
+		Window:   windowName,
 	}
 
 	var calls []transcriptionResponse
@@ -2051,7 +2087,7 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 		}
 		call := s.toResponse(t, baseURL)
 		callTime := call.CallTimestamp.UTC()
-		if callTime.Before(cutoff) {
+		if windowDuration > 0 && callTime.Before(cutoff) {
 			continue
 		}
 
@@ -2104,33 +2140,21 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	callTypeFilter := strings.TrimSpace(r.URL.Query().Get("call_type"))
 	tagFilter := parseTagFilter(r.URL.Query().Get("tags"))
 
-	windowName := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("window")))
-	if windowName == "" {
-		windowName = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("range")))
+	rawWindow := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("window")))
+	if rawWindow == "" {
+		rawWindow = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("range")))
 	}
-	if windowName == "" {
-		windowName = "24h"
-	}
-	windowDuration := 24 * time.Hour
-	switch windowName {
-	case "6h", "6hr", "6hrs", "6hours":
-		windowDuration = 6 * time.Hour
-		windowName = "6h"
-	case "7d", "7days", "week":
-		windowDuration = 7 * 24 * time.Hour
-		windowName = "7d"
-	case "30d", "30days", "month":
-		windowDuration = 30 * 24 * time.Hour
-		windowName = "30d"
-	default:
-		windowName = "24h"
-	}
-
-	cutoff := time.Now().UTC().Add(-windowDuration)
+	windowName, windowDuration := normalizeWindowName(rawWindow, "24h")
 
 	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
-	where := []string{"COALESCE(call_timestamp, created_at) >= ?"}
-	args := []interface{}{cutoff}
+	where := []string{}
+	args := []interface{}{}
+	var cutoff time.Time
+	if windowDuration > 0 {
+		cutoff = time.Now().UTC().Add(-windowDuration)
+		where = append(where, "COALESCE(call_timestamp, created_at) >= ?")
+		args = append(args, cutoff)
+	}
 	if search != "" {
 		like := "%" + strings.ToLower(search) + "%"
 		where = append(where, "(lower(filename) LIKE ? OR lower(coalesce(clean_transcript_text, transcript_text, '')) LIKE ? OR lower(coalesce(raw_transcript_text, '')) LIKE ? OR lower(coalesce(normalized_transcript, '')) LIKE ?)")
@@ -2169,10 +2193,9 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 
 	filtered := make([]transcriptionResponse, 0, len(calls))
 	stats := callStats{StatusCounts: make(map[string]int), CallTypeCounts: make(map[string]int), TagCounts: make(map[string]int), AgencyCounts: make(map[string]int), TownCounts: make(map[string]int), AvailableWindow: windowName}
-	insightCutoff := cutoff
 
 	for _, call := range calls {
-		if call.CallTimestamp.Before(cutoff) {
+		if windowDuration > 0 && call.CallTimestamp.Before(cutoff) {
 			continue
 		}
 		if statusFilter != "" && call.Status != statusFilter {
@@ -2182,17 +2205,11 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		filtered = append(filtered, call)
-		if call.Status != statusDone {
-			continue
-		}
-		if call.CallTimestamp.Before(insightCutoff) {
-			continue
-		}
+		stats.StatusCounts[call.Status]++
 		if call.DuplicateOf != nil && *call.DuplicateOf != "" {
 			continue
 		}
 		stats.Total++
-		stats.StatusCounts[call.Status]++
 		if call.CallType != nil {
 			stats.CallTypeCounts[strings.ToLower(*call.CallType)]++
 		}
@@ -2217,6 +2234,32 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 func respondJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func normalizeWindowName(raw, defaultName string) (string, time.Duration) {
+	name := strings.ToLower(strings.TrimSpace(raw))
+	if name == "" {
+		name = strings.ToLower(strings.TrimSpace(defaultName))
+	}
+
+	switch name {
+	case "6h", "6hr", "6hrs", "6hours":
+		return "6h", 6 * time.Hour
+	case "12h", "12hr", "12hrs", "12hours", "halfday":
+		return "12h", 12 * time.Hour
+	case "24h", "24hr", "24hrs", "24hours", "day", "1d":
+		return "24h", 24 * time.Hour
+	case "72h", "72hr", "72hrs", "72hours", "3d", "3days":
+		return "72h", 72 * time.Hour
+	case "all", "any", "everything":
+		return "all", 0
+	case "7d", "7days", "week":
+		return "7d", 7 * 24 * time.Hour
+	case "30d", "30days", "month":
+		return "30d", 30 * 24 * time.Hour
+	default:
+		return normalizeWindowName(defaultName, defaultName)
+	}
 }
 
 func parseTagFilter(raw string) []string {
@@ -2619,7 +2662,12 @@ func (s *server) locationFromRecord(t transcription, meta formatting.CallMetadat
 	if t.Latitude != nil && t.Longitude != nil {
 		label := derefString(t.LocationLabel, formatting.FormatLocationLabel(&formatting.ParsedLocation{Municipality: meta.TownDisplay}))
 		source := derefString(t.LocationSource, "stored")
-		return &locationGuess{Label: label, Latitude: *t.Latitude, Longitude: *t.Longitude, Precision: source, Source: source}
+		lat := *t.Latitude
+		lng := *t.Longitude
+		if !isWithinSussexCounty(lat, lng) {
+			return &locationGuess{Label: label, Precision: source, Source: source}
+		}
+		return &locationGuess{Label: label, Latitude: lat, Longitude: lng, Precision: source, Source: source}
 	}
 	if t.LocationLabel != nil && strings.TrimSpace(*t.LocationLabel) != "" {
 		label := strings.TrimSpace(*t.LocationLabel)
@@ -2655,6 +2703,10 @@ func (s *server) parseAndGeocodeLocation(ctx context.Context, normalized string,
 
 	lat, lng, precision, err := formatting.GeocodeParsedLocation(ctx, s.client, formatting.GeocoderConfig{Token: token}, parsed)
 	if err != nil {
+		return guess
+	}
+	if !isWithinSussexCounty(lat, lng) {
+		guess.Source = "parsed_out_of_county"
 		return guess
 	}
 	guess.Latitude = lat
@@ -2729,12 +2781,15 @@ func (s *server) buildLocationCandidates(t transcription, meta formatting.CallMe
 	recognized := parseRecognizedTownList(t.RecognizedTowns)
 	for _, town := range recognized {
 		add(fmt.Sprintf("%s, NJ", town))
+		add(fmt.Sprintf("%s, Sussex County, NJ", town))
 	}
 	if meta.TownDisplay != "" {
 		add(fmt.Sprintf("%s, NJ", meta.TownDisplay))
+		add(fmt.Sprintf("%s, Sussex County, NJ", meta.TownDisplay))
 	}
 	if meta.AgencyDisplay != "" {
 		add(fmt.Sprintf("%s, NJ", meta.AgencyDisplay))
+		add(fmt.Sprintf("%s, Sussex County, NJ", meta.AgencyDisplay))
 	}
 	add("Sussex County, NJ")
 
@@ -2779,6 +2834,12 @@ func (s *server) geocodeWithMapbox(ctx context.Context, token, query string) *lo
 	if len(feature.Center) < 2 {
 		return nil
 	}
+	lat := feature.Center[1]
+	lng := feature.Center[0]
+	if !isWithinSussexCounty(lat, lng) {
+		log.Printf("mapbox result outside Sussex County ignored for %s: %s (%f,%f)", query, feature.PlaceName, lat, lng)
+		return nil
+	}
 
 	precision := ""
 	if len(feature.PlaceType) > 0 {
@@ -2787,8 +2848,8 @@ func (s *server) geocodeWithMapbox(ctx context.Context, token, query string) *lo
 
 	return &locationGuess{
 		Label:     feature.PlaceName,
-		Latitude:  feature.Center[1],
-		Longitude: feature.Center[0],
+		Latitude:  lat,
+		Longitude: lng,
 		Precision: precision,
 		Source:    query,
 	}
