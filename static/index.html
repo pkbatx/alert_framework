@@ -81,18 +81,35 @@
 
     <section id="filter-chips" class="filter-chips" aria-live="polite"></section>
 
-    <main class="grid">
-      <aside class="panel list-panel">
-        <div class="panel-header">
-          <div>
-            <p class="eyebrow">Calls</p>
-            <h2 id="list-caption">Recent calls</h2>
+    <main class="layout">
+      <section class="map-list">
+        <div class="panel map-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Geography</p>
+              <h2>Map + markers</h2>
+              <p class="muted">Uses stored lat/lng from transcripts; clicking a call recenters the map.</p>
+            </div>
+            <div class="map-controls" role="group" aria-label="Map layers">
+              <button type="button" id="map-layer-density" class="ghost active">Density</button>
+              <button type="button" id="map-layer-points" class="ghost">Points</button>
+            </div>
           </div>
-          <span id="total-count" class="muted"></span>
+          <div id="map-chart" class="chart map-chart"></div>
         </div>
-        <div id="call-list" class="call-list" role="list"></div>
-        <div id="empty-state" class="empty hidden">No calls in this window yet.</div>
-      </aside>
+
+        <aside class="panel list-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Calls</p>
+              <h2 id="list-caption">Recent calls</h2>
+            </div>
+            <span id="total-count" class="muted"></span>
+          </div>
+          <div id="call-list" class="call-list" role="list"></div>
+          <div id="empty-state" class="empty hidden">No calls in this window yet.</div>
+        </aside>
+      </section>
 
       <section class="panel detail-panel">
         <div class="panel-header">
@@ -137,54 +154,28 @@
             </div>
             <div id="transcript-text" class="transcript-text">Pick a call to read the transcript.</div>
           </div>
-
-          <div class="preview-card">
-            <div class="preview-header">
-              <div>
-                <h3>Dynamic preview</h3>
-                <p class="muted">Shareable image that includes the latest transcript snippet.</p>
-              </div>
-              <a id="preview-link" class="ghost" target="_blank" rel="noopener">Open preview</a>
-            </div>
-            <img id="preview-image" class="preview-image hidden" alt="Transcript preview" loading="lazy" />
-          </div>
         </div>
       </section>
 
       <section class="panel insights-panel">
         <div class="panel-header">
           <div>
-            <p class="eyebrow">Insights</p>
-            <h2>Last 24 hours</h2>
+            <p class="eyebrow">Highlights</p>
+            <h2>Quick stats</h2>
             <p class="muted">Insights only include completed, non-duplicate transcriptions from the past day.</p>
           </div>
           <button id="toggle-insights" class="ghost" type="button">Collapse</button>
         </div>
         <div id="insights-body">
-          <div class="insight-row">
-            <div class="story-card">
-              <div class="story-header">
-                <div>
-                  <p class="eyebrow">Narrative highlights</p>
-                  <h3>What matters now</h3>
-                </div>
-                <span class="muted">Auto-updates with the data you see</span>
+          <div class="story-card">
+            <div class="story-header">
+              <div>
+                <p class="eyebrow">Narrative highlights</p>
+                <h3>What matters now</h3>
               </div>
-              <ul id="story-list" class="story-list"></ul>
+              <span class="muted">Auto-updates with the data you see</span>
             </div>
-            <div class="map-wrapper">
-              <div class="map-header">
-                <div>
-                  <h4>Geography</h4>
-                  <p class="muted">Interactive density + address markers.</p>
-                </div>
-                <div class="map-controls" role="group" aria-label="Map layers">
-                  <button type="button" id="map-layer-density" class="ghost active">Density</button>
-                  <button type="button" id="map-layer-points" class="ghost">Points</button>
-                </div>
-              </div>
-              <div id="map-chart" class="chart map-chart"></div>
-            </div>
+            <ul id="story-list" class="story-list"></ul>
           </div>
         </div>
       </section>

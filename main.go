@@ -141,6 +141,10 @@ type transcription struct {
 	CallType             *string    `json:"call_type"`
 	CallTimestamp        *time.Time `json:"call_timestamp"`
 	TagsJSON             *string    `json:"tags"`
+	Latitude             *float64   `json:"latitude"`
+	Longitude            *float64   `json:"longitude"`
+	LocationLabel        *string    `json:"location_label"`
+	LocationSource       *string    `json:"location_source"`
 	CreatedAt            time.Time  `json:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at"`
 	Similar              []similar  `json:"similar,omitempty"`
@@ -464,6 +468,7 @@ func initDB(db *sql.DB) error {
 		{version: 1, name: "baseline schema", up: migrateBaseline},
 		{version: 2, name: "add ingest source", up: migrateAddIngestSource},
 		{version: 3, name: "add call metadata columns", up: migrateAddCallMetadata},
+		{version: 4, name: "add location columns", up: migrateAddLocationColumns},
 	}
 	return applyMigrations(db, migrations)
 }
@@ -559,6 +564,10 @@ END;`
 		"recognized_towns":         "TEXT",
 		"normalized_transcript":    "TEXT",
 		"call_type":                "TEXT",
+		"latitude":                 "REAL",
+		"longitude":                "REAL",
+		"location_label":           "TEXT",
+		"location_source":          "TEXT",
 	}
 	for col, colType := range needed {
 		if err := addColumnIfMissing(db, "transcriptions", col, colType); err != nil {
@@ -607,6 +616,21 @@ func migrateAddCallMetadata(db *sql.DB) error {
 	}
 	if err := addColumnIfMissing(db, "transcriptions", "tags", "TEXT"); err != nil {
 		return err
+	}
+	return nil
+}
+
+func migrateAddLocationColumns(db *sql.DB) error {
+	columns := map[string]string{
+		"latitude":        "REAL",
+		"longitude":       "REAL",
+		"location_label":  "TEXT",
+		"location_source": "TEXT",
+	}
+	for col, colType := range columns {
+		if err := addColumnIfMissing(db, "transcriptions", col, colType); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -862,7 +886,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			log.Printf("failed to mirror duplicate data: %v", err)
 		}
 		note := fmt.Sprintf("duplicate of %s", dup)
-		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil)
+		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 		if j.sendGroupMe {
 			followup := fmt.Sprintf("%s transcript is duplicate of %s", filename, dup)
 			_ = s.sendGroupMe(followup)
@@ -896,6 +920,11 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		callType = &ct
 	}
 
+	if normalized == nil || strings.TrimSpace(*normalized) == "" {
+		fallback := formatting.NormalizeTranscript(cleanedTranscript)
+		normalized = &fallback
+	}
+
 	recognized := parseRecognizedTowns(towns)
 	tagsList := s.buildTags(j.meta, recognized, callType)
 	var tagsJSON *string
@@ -904,7 +933,33 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		tagsJSON = &str
 	}
 
-	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType, tagsJSON); err != nil {
+	var latPtr, lonPtr *float64
+	var locationLabel *string
+	var locationSource *string
+	if normalized != nil {
+		locCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		resolved := s.parseAndGeocodeLocation(locCtx, *normalized, j.meta)
+		cancel()
+		if resolved != nil {
+			if resolved.Label != "" {
+				label := resolved.Label
+				locationLabel = &label
+			}
+			if resolved.Source != "" {
+				source := resolved.Source
+				locationSource = &source
+			}
+			if resolved.Latitude != 0 || resolved.Longitude != 0 {
+				lat := resolved.Latitude
+				lon := resolved.Longitude
+				latPtr = &lat
+				lonPtr = &lon
+			}
+			s.locationCache.Store(filename, resolved)
+		}
+	}
+
+	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType, tagsJSON, latPtr, lonPtr, locationLabel, locationSource); err != nil {
 		status = err.Error()
 		return err
 	}
@@ -997,6 +1052,14 @@ func (s *server) multiPassTranscription(path string, opts TranscriptionOptions) 
 	}
 	if c, err := s.enhanceTranscript(cleaned); err == nil && c != "" {
 		cleaned = c
+	}
+
+	normalizationSource := cleaned
+	if normalized != nil && strings.TrimSpace(*normalized) != "" {
+		normalizationSource = *normalized
+	}
+	if normalizedText := formatting.NormalizeTranscript(normalizationSource); normalizedText != "" {
+		normalized = &normalizedText
 	}
 
 	var translation *string
@@ -1955,7 +2018,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 
 	cutoff := time.Now().Add(-windowDuration)
 
-	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, created_at, updated_at FROM transcriptions`
+	base := `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
 	where := []string{"COALESCE(call_timestamp, created_at) >= ?"}
 	args := []interface{}{cutoff}
 	if search != "" {
@@ -1987,7 +2050,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	var calls []transcriptionResponse
 	for rows.Next() {
 		var t transcription
-		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
@@ -2388,7 +2451,10 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 
 	var location *locationGuess
 	if t.Status == statusDone {
-		location = s.deriveLocation(t, meta)
+		location = s.locationFromRecord(t, meta)
+		if location == nil {
+			location = s.deriveLocation(t, meta)
+		}
 	}
 
 	return transcriptionResponse{
@@ -2425,6 +2491,55 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 		Segments:             s.buildSegments(t),
 		Location:             location,
 	}
+}
+
+func (s *server) locationFromRecord(t transcription, meta formatting.CallMetadata) *locationGuess {
+	if t.Latitude != nil && t.Longitude != nil {
+		label := derefString(t.LocationLabel, formatting.FormatLocationLabel(&formatting.ParsedLocation{Municipality: meta.TownDisplay}))
+		source := derefString(t.LocationSource, "stored")
+		return &locationGuess{Label: label, Latitude: *t.Latitude, Longitude: *t.Longitude, Precision: source, Source: source}
+	}
+	if t.LocationLabel != nil && strings.TrimSpace(*t.LocationLabel) != "" {
+		label := strings.TrimSpace(*t.LocationLabel)
+		source := derefString(t.LocationSource, "parsed")
+		return &locationGuess{Label: label, Precision: source, Source: source}
+	}
+	return nil
+}
+
+func (s *server) parseAndGeocodeLocation(ctx context.Context, normalized string, meta formatting.CallMetadata) *locationGuess {
+	normalized = strings.TrimSpace(normalized)
+	if normalized == "" {
+		return nil
+	}
+	parsed, err := formatting.ParseLocationFromTranscript(normalized)
+	if err != nil || parsed == nil {
+		if meta.TownDisplay == "" {
+			return nil
+		}
+		parsed = &formatting.ParsedLocation{Municipality: meta.TownDisplay, RawText: meta.TownDisplay}
+	} else if parsed.Municipality == "" && meta.TownDisplay != "" {
+		parsed.Municipality = meta.TownDisplay
+	}
+
+	label := formatting.FormatLocationLabel(parsed)
+	guess := &locationGuess{Label: label, Precision: "parsed", Source: "parsed"}
+
+	token := strings.TrimSpace(s.cfg.MapboxToken)
+	if token == "" {
+		guess.Source = "unconfigured"
+		return guess
+	}
+
+	lat, lng, precision, err := formatting.GeocodeParsedLocation(ctx, s.client, formatting.GeocoderConfig{Token: token}, parsed)
+	if err != nil {
+		return guess
+	}
+	guess.Latitude = lat
+	guess.Longitude = lng
+	guess.Precision = precision
+	guess.Source = "parsed_geocode"
+	return guess
 }
 
 func (s *server) deriveLocation(t transcription, meta formatting.CallMetadata) *locationGuess {
@@ -2663,8 +2778,8 @@ func (s *server) ensureSettingsRow() error {
 func (s *server) getTranscription(filename string) (*transcription, error) {
 	var t transcription
 	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
-		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.CreatedAt, &t.UpdatedAt)
-	}, `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
+		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt)
+	}, `SELECT id, filename, source_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -2693,8 +2808,8 @@ func (s *server) markProcessing(filename, sourcePath, source string, size int64,
 	return err
 }
 
-func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string, diarized *string, towns *string, normalized *string, actualModel *string, callType *string, tags *string) error {
-	_, err := execWithRetry(s.db, `UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(?, tags) WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, tags, filename)
+func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string, diarized *string, towns *string, normalized *string, actualModel *string, callType *string, tags *string, lat *float64, lon *float64, label *string, source *string) error {
+	_, err := execWithRetry(s.db, `UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(?, tags), latitude=?, longitude=?, location_label=COALESCE(?, location_label), location_source=COALESCE(?, location_source) WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, tags, lat, lon, label, source, filename)
 	return err
 }
 
@@ -2789,7 +2904,7 @@ func (s *server) copyFromDuplicate(filename, duplicate string) error {
 	if err != nil {
 		return err
 	}
-	_, err = execWithRetry(s.db, `UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(transcriptions.tags, ?), call_timestamp=COALESCE(transcriptions.call_timestamp, ?) WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, src.TagsJSON, src.CallTimestamp, filename)
+	_, err = execWithRetry(s.db, `UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(transcriptions.tags, ?), call_timestamp=COALESCE(transcriptions.call_timestamp, ?), latitude=COALESCE(?, latitude), longitude=COALESCE(?, longitude), location_label=COALESCE(?, location_label), location_source=COALESCE(?, location_source) WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, src.TagsJSON, src.CallTimestamp, src.Latitude, src.Longitude, src.LocationLabel, src.LocationSource, filename)
 	return err
 }
 
