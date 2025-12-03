@@ -61,7 +61,7 @@ var (
 		"gpt-4o-mini-transcribe":    {"json", "text"},
 		"gpt-4o-transcribe":         {"json", "text"},
 		"gpt-4o-transcribe-diarize": {"json", "text", "diarized_json"},
-		"gpt4-trasncribe":           {"json", "text"},
+		"gpt4-transcribe":           {"json", "text"},
 	}
 	allowedExtensions = map[string]struct{}{
 		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
@@ -3056,7 +3056,7 @@ func fallbackEmpty(value, fallback string) string {
 
 func normalizeModelName(model string) string {
 	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "gpt4-trasncribe", "gpt4-transcribe", "gpt-4-transcribe", "gpt4o-transcribe":
+	case "gpt4-transcribe", "gpt-4-transcribe", "gpt4o-transcribe":
 		return defaultTranscriptionModel
 	}
 	return model
