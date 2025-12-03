@@ -1,12 +1,22 @@
 #!/usr/bin/env sh
-set -e
+set -eu
 
-# Ensure working directories exist for bind mounts or defaults
-mkdir -p "${CALLS_DIR:-/data/calls}" "${WORK_DIR:-/data/work}"
+CALLS_DIR=${CALLS_DIR:-/data/calls}
+WORK_DIR=${WORK_DIR:-/data/work}
+DB_PATH=${DB_PATH:-${WORK_DIR}/transcriptions.db}
+HTTP_PORT=${HTTP_PORT:-:8000}
 
-# If DB_PATH is not provided, align it with WORK_DIR so persisted volumes work
-if [ -z "${DB_PATH}" ]; then
-  export DB_PATH="${WORK_DIR:-/data/work}/transcriptions.db"
-fi
+for var in OPENAI_API_KEY GROUPME_BOT_ID GROUPME_ACCESS_TOKEN; do
+  eval "value=\${${var}:-}"
+  if [ -z "${value}" ]; then
+    echo "Environment variable ${var} is required" >&2
+    exit 1
+  fi
+done
 
-exec "$@"
+mkdir -p "${CALLS_DIR}" "${WORK_DIR}" "$(dirname "${DB_PATH}")"
+[ -f "${DB_PATH}" ] || touch "${DB_PATH}"
+
+export CALLS_DIR WORK_DIR DB_PATH HTTP_PORT
+
+exec /app/alert_framework "$@"
