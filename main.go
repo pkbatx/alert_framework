@@ -177,6 +177,7 @@ type transcriptSegment struct {
 }
 
 type transcriptionResponse struct {
+	ID                   int64               `json:"id"`
 	Filename             string              `json:"filename"`
 	SourcePath           string              `json:"source_path,omitempty"`
 	Source               string              `json:"source"`
@@ -205,6 +206,20 @@ type transcriptionResponse struct {
 	Town                 string              `json:"town,omitempty"`
 	Agency               string              `json:"agency,omitempty"`
 	AudioURL             string              `json:"audio_url,omitempty"`
+	AudioPath            string              `json:"audio_path,omitempty"`
+	AudioFilename        string              `json:"audio_filename,omitempty"`
+	CallCategory         string              `json:"call_category,omitempty"`
+	TimestampLocal       string              `json:"timestamp_local,omitempty"`
+	AddressLine          string              `json:"address_line,omitempty"`
+	CrossStreet          string              `json:"cross_street,omitempty"`
+	CityOrTown           string              `json:"city_or_town,omitempty"`
+	County               string              `json:"county,omitempty"`
+	State                string              `json:"state,omitempty"`
+	Summary              string              `json:"summary,omitempty"`
+	CleanSummary         string              `json:"clean_summary,omitempty"`
+	PrimaryAgency        string              `json:"primary_agency,omitempty"`
+	NormalizedCallType   string              `json:"normalized_call_type,omitempty"`
+	IncidentID           string              `json:"incident_id,omitempty"`
 	PreviewImage         string              `json:"preview_image,omitempty"`
 	Tags                 []string            `json:"tags,omitempty"`
 	Segments             []transcriptSegment `json:"segments,omitempty"`
@@ -751,7 +766,8 @@ func (s *server) watch() {
 
 func (s *server) handleNewFile(filename string) {
 	meta, pretty, publicURL, _ := s.buildJobContext(filename)
-	text := formatting.BuildAlertMessage(meta, pretty, publicURL)
+	incident := s.buildIncidentDetails(meta, nil, nil, nil, nil, meta.DateTime, filename, publicURL, "")
+	text := formatting.BuildIncidentAlert(incident)
 	if err := s.sendGroupMe(text); err != nil {
 		log.Printf("groupme send failed: %v", err)
 	}
@@ -839,7 +855,7 @@ func (s *server) buildJobContext(filename string) (formatting.CallMetadata, stri
 	}
 	pretty := formatting.FormatPrettyTitle(filename, meta.DateTime, s.tz)
 	base := s.resolveBaseURL(nil)
-	return meta, pretty, s.publicURL(base, filename), base
+	return meta, pretty, formatting.BuildListenURL(filename), base
 }
 
 func (s *server) resolveBaseURL(r *http.Request) string {
@@ -1035,11 +1051,13 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	var latPtr, lonPtr *float64
 	var locationLabel *string
 	var locationSource *string
+	var resolvedLocation *locationGuess
 	if normalized != nil {
 		locCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		resolved := s.parseAndGeocodeLocation(locCtx, *normalized, j.meta)
 		cancel()
 		if resolved != nil {
+			resolvedLocation = resolved
 			if resolved.Label != "" {
 				label := resolved.Label
 				locationLabel = &label
@@ -1072,7 +1090,14 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		if err := s.fireWebhooks(j); err != nil {
 			log.Printf("webhook error: %v", err)
 		}
-		followup := fmt.Sprintf("%s transcript:\n%s", j.prettyTitle, cleanedTranscript)
+		audioName := s.audioFilename(transcription{ProcessedPath: processedPath, SourcePath: sourcePath, Filename: filename})
+		callTime := j.meta.DateTime
+		if callTime.IsZero() {
+			callTime = time.Now().In(s.tz)
+		}
+		incident := s.buildIncidentDetails(j.meta, callType, tagsList, resolvedLocation, recognized, callTime, audioName, formatting.BuildListenURL(audioName), cleanedTranscript)
+		header := formatting.FormatIncidentHeader(incident)
+		followup := fmt.Sprintf("%s\n\nTranscript:\n%s", header, cleanedTranscript)
 		if err := s.sendGroupMe(followup); err != nil {
 			log.Printf("groupme follow-up failed: %v", err)
 		}
@@ -2664,6 +2689,108 @@ func (s *server) audioFilename(t transcription) string {
 	return t.Filename
 }
 
+func sanitizeSummary(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	const maxLen = 320
+	runes := []rune(trimmed)
+	if len(runes) > maxLen {
+		trimmed = strings.TrimSpace(string(runes[:maxLen])) + "…"
+	}
+	return trimmed
+}
+
+func (s *server) deriveLocationFields(meta formatting.CallMetadata, recognized []string, normalized string, loc *locationGuess) (string, string, string, string, string) {
+	city := strings.TrimSpace(meta.TownDisplay)
+	if city == "" && len(recognized) > 0 {
+		city = strings.TrimSpace(strings.Title(strings.ToLower(recognized[0])))
+	}
+
+	var parsed *formatting.ParsedLocation
+	if loc != nil && strings.TrimSpace(loc.Label) != "" {
+		if p, err := formatting.ParseLocationFromTranscript(loc.Label); err == nil {
+			parsed = p
+		}
+	}
+	if parsed == nil && strings.TrimSpace(normalized) != "" {
+		if p, err := formatting.ParseLocationFromTranscript(normalized); err == nil {
+			parsed = p
+		}
+	}
+
+	address := ""
+	cross := ""
+	if parsed != nil {
+		if parsed.HouseNumber != "" && parsed.Street != "" {
+			address = strings.TrimSpace(parsed.HouseNumber + " " + parsed.Street)
+		} else if parsed.Street != "" {
+			address = parsed.Street
+		}
+		if parsed.CrossStreet != "" {
+			cross = parsed.CrossStreet
+			if address == "" && parsed.Street != "" {
+				address = parsed.Street
+			}
+		}
+		if parsed.Municipality != "" {
+			city = parsed.Municipality
+		}
+	}
+	if address == "" && loc != nil && strings.TrimSpace(loc.Label) != "" {
+		address = strings.TrimSpace(loc.Label)
+	}
+
+	county := ""
+	if city != "" {
+		county = countyByTown[strings.ToLower(city)]
+	}
+	state := ""
+	if county != "" {
+		state = "NJ"
+	}
+	return strings.TrimSpace(address), strings.TrimSpace(cross), strings.TrimSpace(city), county, state
+}
+
+func (s *server) buildIncidentDetails(meta formatting.CallMetadata, callType *string, tags []string, loc *locationGuess, recognized []string, callTime time.Time, audioFilename, listenURL, summary string) formatting.IncidentDetails {
+	callTypeVal := derefString(callType, meta.CallType)
+	address, cross, city, county, state := s.deriveLocationFields(meta, recognized, summary, loc)
+	ts := callTime
+	if ts.IsZero() {
+		ts = time.Now().In(s.tz)
+	}
+
+	audioPath := ""
+	if strings.TrimSpace(audioFilename) != "" {
+		audioPath = "/" + url.PathEscape(strings.TrimLeft(audioFilename, "/"))
+	}
+
+	incidentID := meta.RawFileName
+	if incidentID == "" {
+		incidentID = audioFilename
+	}
+
+	return formatting.IncidentDetails{
+		ID:            incidentID,
+		PrettyTitle:   formatting.FormatPrettyTitle(meta.RawFileName, ts, s.tz),
+		Agency:        meta.AgencyDisplay,
+		CallType:      callTypeVal,
+		CallCategory:  formatting.NormalizeCallCategory(callTypeVal),
+		AddressLine:   address,
+		CrossStreet:   cross,
+		CityOrTown:    city,
+		County:        county,
+		State:         state,
+		Summary:       sanitizeSummary(summary),
+		Tags:          tags,
+		Timestamp:     ts,
+		ListenURL:     listenURL,
+		AudioPath:     audioPath,
+		AudioFilename: audioFilename,
+	}
+}
+
 func (s *server) toResponse(t transcription, baseURL string) transcriptionResponse {
 	meta, err := formatting.ParseCallMetadataFromFilename(t.Filename, s.tz)
 	if err != nil {
@@ -2686,6 +2813,7 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 		ct := meta.CallType
 		callType = &ct
 	}
+	callTypeVal := strings.TrimSpace(derefString(callType, ""))
 	pretty := formatting.FormatPrettyTitle(t.Filename, callTime, s.tz)
 	tags := parseRecognizedTownList(t.TagsJSON)
 	if len(tags) == 0 {
@@ -2701,7 +2829,15 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 		}
 	}
 
+	normalizedText := derefString(t.NormalizedTranscript, derefString(t.CleanTranscript, derefString(t.Transcript, "")))
+	audioFilename := s.audioFilename(t)
+	listenURL := s.publicURL(baseURL, audioFilename)
+	incident := s.buildIncidentDetails(meta, callType, tags, location, recognized, callTime, audioFilename, listenURL, normalizedText)
+	timestampLocal := incident.Timestamp.In(s.tz).Format(time.RFC3339)
+	cleanSummary := sanitizeSummary(derefString(t.CleanTranscript, ""))
+
 	return transcriptionResponse{
+		ID:                   t.ID,
 		Filename:             t.Filename,
 		SourcePath:           t.SourcePath,
 		Source:               t.Source,
@@ -2729,7 +2865,21 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 		PrettyTitle:          pretty,
 		Town:                 meta.TownDisplay,
 		Agency:               meta.AgencyDisplay,
-		AudioURL:             s.publicURL(baseURL, s.audioFilename(t)),
+		AudioURL:             listenURL,
+		AudioPath:            incident.AudioPath,
+		AudioFilename:        incident.AudioFilename,
+		CallCategory:         incident.CallCategory,
+		TimestampLocal:       timestampLocal,
+		AddressLine:          incident.AddressLine,
+		CrossStreet:          incident.CrossStreet,
+		CityOrTown:           incident.CityOrTown,
+		County:               incident.County,
+		State:                incident.State,
+		Summary:              incident.Summary,
+		CleanSummary:         cleanSummary,
+		PrimaryAgency:        meta.AgencyDisplay,
+		NormalizedCallType:   callTypeVal,
+		IncidentID:           incident.ID,
 		PreviewImage:         s.previewURL(baseURL, t.Filename),
 		Tags:                 tags,
 		Segments:             s.buildSegments(t),
@@ -3312,38 +3462,55 @@ func (s *server) fireWebhooks(j processJob) error {
 	format := derefString(t.RequestedFormat, "")
 	callTypeVal := pointerString(t.CallType)
 
-	var town *string
-	if len(recognized) > 0 {
-		town = &recognized[0]
-	}
-	if town == nil && j.meta.TownDisplay != "" {
-		summaryTown := j.meta.TownDisplay
-		town = &summaryTown
-	}
-
 	alertTime := time.Now()
 	if !j.meta.DateTime.IsZero() {
 		alertTime = j.meta.DateTime
 	}
 
+	callTime := alertTime
+	if t.CallTimestamp != nil {
+		callTime = t.CallTimestamp.In(s.tz)
+	}
+
+	tags := parseRecognizedTownList(t.TagsJSON)
+	if len(tags) == 0 {
+		tags = s.buildTags(j.meta, recognized, callTypeVal)
+	}
+	location := s.locationFromRecord(*t, j.meta)
+	if location == nil {
+		location = s.deriveLocation(*t, j.meta)
+	}
+
+	audioFilename := s.audioFilename(*t)
+	listenURL := formatting.BuildListenURL(audioFilename)
+	incidentSummary := derefString(normalized, "")
+	incident := s.buildIncidentDetails(j.meta, callTypeVal, tags, location, recognized, callTime, audioFilename, listenURL, incidentSummary)
+
 	payload := map[string]interface{}{
 		"timestamp_utc":  alertTime.UTC().Format(time.RFC3339),
 		"local_datetime": alertTime.In(s.tz).Format("2006-01-02 15:04:05"),
 		"filename":       t.Filename,
-		"url":            j.publicURL,
+		"url":            listenURL,
 		"preview_image":  s.previewURL(j.baseURL, t.Filename),
 		"pretty_title":   j.prettyTitle,
-		"alert_message":  formatting.BuildAlertMessage(j.meta, j.prettyTitle, j.publicURL),
+		"alert_message":  formatting.BuildIncidentAlert(incident),
 		"metadata": map[string]interface{}{
-			"agency":    nullableString(j.meta.AgencyDisplay),
-			"town":      nullableString(j.meta.TownDisplay),
-			"call_type": nullableString(j.meta.CallType),
-			"captured":  alertTime.In(s.tz).Format(time.RFC3339),
+			"agency":        nullableString(j.meta.AgencyDisplay),
+			"town":          nullableString(incident.CityOrTown),
+			"county":        nullableString(incident.County),
+			"state":         nullableString(incident.State),
+			"address_line":  nullableString(incident.AddressLine),
+			"cross_street":  nullableString(incident.CrossStreet),
+			"call_type":     nullableString(derefString(callTypeVal, j.meta.CallType)),
+			"call_category": nullableString(incident.CallCategory),
+			"captured":      alertTime.In(s.tz).Format(time.RFC3339),
 		},
 		"summary": map[string]interface{}{
 			"agency":           nullableString(j.meta.AgencyDisplay),
-			"town":             town,
-			"address":          nil,
+			"town":             nullableString(incident.CityOrTown),
+			"county":           nullableString(incident.County),
+			"state":            nullableString(incident.State),
+			"address":          nullableString(incident.AddressLine),
 			"call_type":        callTypeVal,
 			"units_dispatched": nil,
 		},
@@ -3356,6 +3523,7 @@ func (s *server) fireWebhooks(j processJob) error {
 			"mode":             nullableString(mode),
 			"format":           nullableString(format),
 			"call_type":        callTypeVal,
+			"call_category":    nullableString(incident.CallCategory),
 		},
 	}
 	buf, _ := json.Marshal(payload)

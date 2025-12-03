@@ -396,6 +396,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; box-shadow: none; }
 
 .call-card .title { font-weight: 700; margin-bottom: 6px; }
 .call-card .meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 13px; }
+.call-card .card-flags { display: flex; align-items: center; gap: 8px; }
 .call-snippet {
   color: var(--muted);
   font-size: 13px;
@@ -420,6 +421,66 @@ button:disabled { opacity: 0.6; cursor: not-allowed; box-shadow: none; }
 .badge.done { color: var(--success); border-color: rgba(94,245,164,0.5); }
 .badge.processing { color: var(--warn); border-color: rgba(255,209,102,0.4); }
 .badge.error { color: var(--error); border-color: rgba(255,143,163,0.5); }
+.badge.warning { color: #fcd34d; border-color: rgba(252, 211, 77, 0.5); }
+
+.incident-card {
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(15, 23, 42, 0.9);
+}
+
+.incident-card--ems,
+.incident-card--medical {
+  border-color: rgba(56, 189, 248, 0.9);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.3);
+}
+
+.incident-card--fire {
+  border-color: rgba(248, 113, 113, 0.9);
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.3);
+}
+
+.incident-card--other {
+  border-color: rgba(148, 163, 184, 0.6);
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.2);
+}
+
+.incident-audio {
+  margin-top: 0.5rem;
+  border-radius: 9999px;
+  padding: 0.35rem 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.875rem;
+}
+
+.incident-audio--ems,
+.incident-audio--medical {
+  background: linear-gradient(90deg, rgba(8, 47, 73, 0.9), rgba(8, 145, 178, 0.9));
+}
+
+.incident-audio--fire {
+  background: linear-gradient(90deg, rgba(127, 29, 29, 0.9), rgba(248, 113, 113, 0.9));
+}
+
+.incident-audio--other {
+  background: linear-gradient(90deg, rgba(30, 64, 175, 0.9), rgba(30, 64, 175, 0.7));
+}
+
+.location-line { color: var(--muted); font-size: 12px; }
+
+.incident-summary {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 12px;
+}
+
+.incident-summary__body { color: var(--text); font-size: 14px; line-height: 1.5; }
+.summary-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
 .meta-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 12px; }
 

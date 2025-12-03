@@ -156,6 +156,11 @@
             <span id="total-count" class="muted"></span>
           </div>
           <div id="call-list" class="call-list" role="list"></div>
+          <div id="loading-state" class="empty hidden">Loading incidents…</div>
+          <div id="error-state" class="empty hidden">
+            <p class="muted">Unable to load incidents.</p>
+            <button id="retry-load" type="button" class="ghost">Retry</button>
+          </div>
           <div id="empty-state" class="empty hidden">No calls in this window yet.</div>
         </aside>
       </section>
@@ -183,6 +188,16 @@
               <p class="muted">Agency/Town</p>
               <strong id="detail-agency">—</strong>
             </div>
+          </div>
+
+          <p id="detail-location" class="muted">Location unavailable</p>
+
+          <div class="incident-summary">
+            <div class="summary-header">
+              <p class="muted">Summary</p>
+              <span id="detail-warning" class="badge warning hidden">Metadata incomplete</span>
+            </div>
+            <p id="detail-summary" class="incident-summary__body">No summary available.</p>
           </div>
 
           <div class="player">
@@ -217,6 +232,6 @@
   </div>
   <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
   <script src="https://api.mapbox.com/mapbox-gl-js/v3.1.2/mapbox-gl.js"></script>
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>

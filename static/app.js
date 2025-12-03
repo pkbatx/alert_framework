@@ -1,6 +1,16 @@
+import {
+  buildIncidentViewModel,
+  formatIncidentHeader,
+  formatIncidentLocation,
+  normalizeIncident,
+} from './incidents.js';
+
 (() => {
   const listEl = document.getElementById('call-list');
   const emptyState = document.getElementById('empty-state');
+  const loadingState = document.getElementById('loading-state');
+  const errorState = document.getElementById('error-state');
+  const retryLoad = document.getElementById('retry-load');
   const totalCount = document.getElementById('total-count');
   const searchInput = document.getElementById('search');
   const statusSelect = document.getElementById('status');
@@ -20,6 +30,9 @@
   const detailStatus = document.getElementById('detail-status');
   const detailType = document.getElementById('detail-type');
   const detailAgency = document.getElementById('detail-agency');
+  const detailLocation = document.getElementById('detail-location');
+  const detailSummary = document.getElementById('detail-summary');
+  const detailWarning = document.getElementById('detail-warning');
   const detailTags = document.getElementById('detail-tags');
   const mapChart = document.getElementById('map-chart');
   const updatedAtEl = document.getElementById('updated-at');
@@ -65,6 +78,8 @@
     inlineAudio: null,
     mapResizeTimer: null,
     activePopup: null,
+    loading: false,
+    error: '',
   };
 
   const MAP_DEFAULT_CENTER = [-74.696, 41.05];
@@ -205,9 +220,8 @@
   }
 
   function callSummary(call) {
-    const type = call.call_type || 'Call';
-    const region = call.agency || call.town || 'Unspecified agency';
-    return `${type} – ${region}`;
+    const vm = buildIncidentViewModel(call);
+    return vm.header;
   }
 
   function dedupeCalls(calls) {
@@ -228,26 +242,34 @@
   }
 
   function callLocationLabel(call) {
-    if (call.location && call.location.label) return call.location.label;
-    if (call.town) return call.town;
-    if (call.agency) return call.agency;
-    return 'Location pending';
+    return formatIncidentLocation(call);
   }
 
   function narrativeSnippet(call) {
-    const text =
-      call.normalized_transcript ||
-      call.clean_transcript_text ||
-      call.transcript_text ||
-      call.raw_transcript_text ||
-      '';
-    return text.trim();
+    const vm = buildIncidentViewModel(call);
+    return vm.summary || 'Transcript pending.';
+  }
+
+  function shortSummary(call, limit = 180) {
+    const snippet = narrativeSnippet(call);
+    if (snippet.length > limit) {
+      return `${snippet.slice(0, limit - 1)}…`;
+    }
+    return snippet;
+  }
+
+  function audioUrlForCall(call) {
+    return call.audioUrl || call.audio_url || call.audioPath || call.audio_path || (call.filename ? `/${call.filename}` : '');
   }
 
   function formatDate(value) {
     if (!value) return '—';
     const dt = new Date(value);
     return dt.toLocaleString();
+  }
+
+  function callTimestampValue(call) {
+    return call.timestampLocal || call.call_timestamp || call.callTimestamp || call.updated_at || call.created_at || null;
   }
 
   function renderTags(container, tags, clickable = false) {
@@ -294,8 +316,8 @@
     const agencyFilter = state.agency.trim().toLowerCase();
     const callTypeFilter = state.callType.trim().toLowerCase();
     let filtered = state.calls.filter((call) => {
-      const agency = (call.agency || call.town || '').toLowerCase();
-      const callType = (call.call_type || '').toLowerCase();
+      const agency = (call.agency || call.town || call.cityOrTown || '').toLowerCase();
+      const callType = (call.callType || call.call_type || '').toLowerCase();
       if (agencyFilter && !agency.includes(agencyFilter)) return false;
       if (callTypeFilter && callType !== callTypeFilter) return false;
       return true;
@@ -308,30 +330,33 @@
           const idxA = order.indexOf(a.status);
           const idxB = order.indexOf(b.status);
           if (idxA === idxB) {
-            return new Date(b.call_timestamp || 0) - new Date(a.call_timestamp || 0);
+            return new Date(callTimestampValue(b) || 0) - new Date(callTimestampValue(a) || 0);
           }
           return idxA - idxB;
         });
         break;
       }
       case 'oldest':
-        filtered = filtered.sort((a, b) => new Date(a.call_timestamp || 0) - new Date(b.call_timestamp || 0));
+        filtered = filtered.sort((a, b) => new Date(callTimestampValue(a) || 0) - new Date(callTimestampValue(b) || 0));
         break;
       default:
-        filtered = filtered.sort((a, b) => new Date(b.call_timestamp || 0) - new Date(a.call_timestamp || 0));
+        filtered = filtered.sort((a, b) => new Date(callTimestampValue(b) || 0) - new Date(callTimestampValue(a) || 0));
     }
 
     return filtered;
   }
 
   function buildCard(call) {
+    const vm = buildIncidentViewModel(call);
+    const audioUrl = audioUrlForCall(call);
+    const hasMissing = Array.isArray(call.missingFields) && call.missingFields.length > 0;
     const card = document.createElement('article');
-    card.className = 'call-card';
+    card.className = `call-card ${vm.cardClass}`;
     card.tabIndex = 0;
     card.setAttribute('role', 'listitem');
     const title = callSummary(call);
     const locationLabel = callLocationLabel(call);
-    const snippet = narrativeSnippet(call) || 'Transcript pending.';
+    const snippet = shortSummary(call);
     const snippetSafe = escapeHTML(snippet);
     const expanded = state.selected && state.selected.filename === call.filename;
     const fullText = escapeHTML(snippet);
@@ -339,15 +364,23 @@
       <div class="card-top">
         <div>
           <div class="title">${escapeHTML(title)}</div>
-          <div class="meta">${formatDate(call.call_timestamp)} • ${escapeHTML(locationLabel)}</div>
+          <div class="meta">${escapeHTML(vm.subtitle || '')}</div>
+          <div class="meta location-line">${escapeHTML(locationLabel)}</div>
         </div>
-        <span class="status-icon ${call.status}" aria-label="${call.status}">${statusIcon(call.status)}</span>
+        <div class="card-flags">
+          <span class="status-icon ${call.status}" aria-label="${call.status}">${statusIcon(call.status)}</span>
+          ${hasMissing ? '<span class="badge warning">Metadata incomplete</span>' : ''}
+        </div>
       </div>
       <div class="call-snippet" title="${snippetSafe}">${snippetSafe}</div>
       <div class="card-footer">
         <span class="badge ${call.status}">${call.status}</span>
         <div class="quick-actions">
-          ${call.audio_url ? '<button type="button" class="mini inline-audio">▶ Preview</button>' : '<span class="muted">No audio</span>'}
+          ${
+            audioUrl
+              ? `<button type="button" class="mini inline-audio incident-audio ${vm.audioClass}">▶ Listen</button>`
+              : '<span class="muted">No audio</span>'
+          }
         </div>
       </div>
       ${expanded ? `<div class="call-expanded" title="${fullText}">${fullText}</div>` : ''}
@@ -381,7 +414,9 @@
 
   function playInlineAudio(call, button) {
     stopInlineAudio();
-    const audio = new Audio(call.audio_url);
+    const audioUrl = audioUrlForCall(call);
+    if (!audioUrl) return;
+    const audio = new Audio(audioUrl);
     audio.preload = 'none';
     button.textContent = '⏸ Pause';
     audio.addEventListener('ended', () => {
@@ -397,13 +432,24 @@
 
   function renderList() {
     listEl.innerHTML = '';
-    const callsToRender = getVisibleCalls();
-    if (!callsToRender.length) {
-      emptyState.classList.remove('hidden');
+    if (loadingState) loadingState.classList.toggle('hidden', !state.loading);
+    if (errorState) errorState.classList.add('hidden');
+    if (emptyState) emptyState.classList.add('hidden');
+    if (state.loading) {
       totalCount.textContent = '';
       return;
     }
-    emptyState.classList.add('hidden');
+    if (state.error) {
+      if (errorState) errorState.classList.remove('hidden');
+      totalCount.textContent = '';
+      return;
+    }
+    const callsToRender = getVisibleCalls();
+    if (!callsToRender.length) {
+      if (emptyState) emptyState.classList.remove('hidden');
+      totalCount.textContent = '';
+      return;
+    }
     callsToRender.forEach((call) => listEl.appendChild(buildCard(call)));
     totalCount.textContent = `${callsToRender.length} calls`;
   }
@@ -427,9 +473,18 @@
       .filter((seg) => seg.text && seg.end > seg.start);
     if (cleaned.length) return cleaned;
 
-    const text = (call.clean_transcript_text || call.raw_transcript_text || call.transcript_text || '').trim();
+    const text = (
+      call.cleanTranscript ||
+      call.clean_transcript_text ||
+      call.rawTranscript ||
+      call.raw_transcript_text ||
+      call.transcript_text ||
+      call.translation ||
+      call.translation_text ||
+      ''
+    ).trim();
     if (!text) return [];
-    const duration = Number(call.duration_seconds) || 0;
+    const duration = Number(call.duration_seconds || call.durationSeconds) || 0;
     return [
       {
         start: 0,
@@ -442,7 +497,16 @@
   function renderTranscript(call) {
     state.segments = normalizeSegments(call);
     const transcriptText =
-      (call.clean_transcript_text || call.raw_transcript_text || call.transcript_text || call.translation_text || '').trim();
+      (
+        call.cleanTranscript ||
+        call.clean_transcript_text ||
+        call.rawTranscript ||
+        call.raw_transcript_text ||
+        call.transcript_text ||
+        call.translation ||
+        call.translation_text ||
+        ''
+      ).trim();
     transcriptEl.innerHTML = '';
     transcriptEl.classList.toggle('playing', highlightToggle.checked && state.wavesurfer && state.wavesurfer.isPlaying());
     if (!state.segments.length) {
@@ -452,8 +516,9 @@
         placeholder.textContent = transcriptText
           ? 'Transcript ready but could not be displayed yet.'
           : 'Transcript unavailable for this completed call.';
-      } else if (call.status === 'error' && call.last_error) {
-        placeholder.textContent = `Transcription failed: ${call.last_error}`;
+      } else if (call.status === 'error' && (call.last_error || call.lastError)) {
+        const err = call.last_error || call.lastError;
+        placeholder.textContent = `Transcription failed: ${err}`;
       } else {
         placeholder.innerHTML = `
           <div class="spinner" aria-hidden="true"></div>
@@ -554,20 +619,30 @@
     state.selected = call;
     stopInlineAudio();
     transcriptEl.classList.remove('playing');
-    detailTitle.textContent = call.pretty_title || call.filename;
-    detailMeta.textContent = `${call.town || 'Unknown town'} • ${formatDate(call.call_timestamp)} • ${call.audio_url ? 'Audio ready' : 'No audio'}`;
+    const vm = buildIncidentViewModel(call);
+    const audioUrl = audioUrlForCall(call);
+    detailTitle.textContent = formatIncidentHeader(call) || call.pretty_title || call.filename;
+    detailMeta.textContent = vm.subtitle || formatDate(callTimestampValue(call));
+    if (detailLocation) detailLocation.textContent = formatIncidentLocation(call);
+    const hasMissing = Array.isArray(call.missingFields) && call.missingFields.length > 0;
+    if (detailWarning) {
+      detailWarning.classList.toggle('hidden', !hasMissing);
+    }
+    if (detailSummary) {
+      detailSummary.textContent = shortSummary(call, 320);
+    }
     detailStatus.innerHTML = `${statusIcon(call.status)} ${call.status}`;
     detailStatus.className = `badge ${call.status}`;
-    detailType.textContent = call.call_type || '—';
-    detailAgency.textContent = call.agency || call.town || '—';
-    updatedAtEl.textContent = `Updated ${formatDate(call.updated_at)}`;
+    detailType.textContent = call.callType || call.call_type || '—';
+    detailAgency.textContent = call.agency || call.cityOrTown || call.town || '—';
+    updatedAtEl.textContent = `Updated ${formatDate(call.updated_at || call.updatedAt)}`;
     renderTags(detailTags, call.tags || []);
     renderTranscript(call);
-    if (call.audio_url) {
+    if (audioUrl) {
       playBtn.disabled = true;
-      createWave(call.audio_url);
+      createWave(audioUrl);
       playBtn.disabled = false;
-      downloadLink.href = call.audio_url;
+      downloadLink.href = audioUrl;
       downloadLink.textContent = 'Open audio';
     } else {
       destroyWave();
@@ -589,8 +664,8 @@
 
   function isRecentCompleted(call) {
     if (!call || call.status !== 'done') return false;
-    if (call.duplicate_of) return false;
-    const tsValue = call.call_timestamp || call.created_at || call.updated_at;
+    if (call.duplicate_of || call.duplicateOf) return false;
+    const tsValue = callTimestampValue(call);
     const ts = tsValue ? new Date(tsValue).getTime() : 0;
     if (!Number.isFinite(ts)) return false;
     const hours = windowHours();
@@ -669,8 +744,8 @@
         properties: {
           title: callSummary(point.call),
           subtitle: callLocationLabel(point.call),
-          timestamp: formatDate(point.call.call_timestamp),
-          weight: Math.max(0.3, Math.min(1, (point.call.duration_seconds || 60) / 600)),
+          timestamp: formatDate(callTimestampValue(point.call)),
+          weight: Math.max(0.3, Math.min(1, (point.call.duration_seconds || point.call.durationSeconds || 60) / 600)),
         },
       })),
     };
@@ -772,7 +847,7 @@
     const html = `
       <div>
         <strong>${escapeHTML(callSummary(call))}</strong>
-        <div class="muted">${formatDate(call.call_timestamp)}</div>
+        <div class="muted">${formatDate(callTimestampValue(call))}</div>
         <div class="muted">${escapeHTML(callLocationLabel(call))}</div>
       </div>`;
     if (state.activePopup) state.activePopup.remove();
@@ -969,28 +1044,39 @@
   }
 
   async function fetchCalls() {
+    state.loading = true;
+    state.error = '';
+    renderList();
     const params = new URLSearchParams();
     params.set('window', state.window);
     if (state.search) params.set('q', state.search);
     if (state.status) params.set('status', state.status);
     if (state.callType) params.set('call_type', state.callType);
     if (state.tagFilter.length) params.set('tags', state.tagFilter.join(','));
-    const res = await fetch(`/api/transcriptions?${params.toString()}`);
-    if (!res.ok) {
-      console.error('Failed to load calls');
-      return;
-    }
-    const payload = await res.json();
-    state.mapboxToken = payload.mapbox_token || state.mapboxToken;
-    state.calls = dedupeCalls(payload.calls || []);
-    state.stats = payload.stats || {};
-    renderList();
-    renderTagFilterOptions();
-    renderFilterChips();
-    renderFilterOptions();
-    applyStats();
-    if (state.calls.length && (!state.selected || !state.calls.find((c) => c.filename === state.selected.filename))) {
-      renderDetail(state.calls[0]);
+    try {
+      const res = await fetch(`/api/transcriptions?${params.toString()}`);
+      if (!res.ok) {
+        throw new Error('Failed to load calls');
+      }
+      const payload = await res.json();
+      state.mapboxToken = payload.mapbox_token || state.mapboxToken;
+      state.calls = dedupeCalls((payload.calls || []).map(normalizeIncident));
+      state.stats = payload.stats || {};
+      renderList();
+      renderTagFilterOptions();
+      renderFilterChips();
+      renderFilterOptions();
+      applyStats();
+      if (state.calls.length && (!state.selected || !state.calls.find((c) => c.filename === state.selected.filename))) {
+        renderDetail(state.calls[0]);
+      }
+    } catch (err) {
+      console.error(err);
+      state.error = 'Unable to load incidents.';
+      renderList();
+    } finally {
+      state.loading = false;
+      renderList();
     }
   }
 
@@ -1013,7 +1099,7 @@
     if (!filename) return;
     const res = await fetch(`/api/transcription/${encodeURIComponent(filename)}`);
     if (!res.ok) return;
-    const data = await res.json();
+    const data = normalizeIncident(await res.json());
     state.calls = dedupeCalls(
       state.calls.map((call) => (call.filename === data.filename ? { ...call, ...data } : call))
     );
@@ -1069,6 +1155,12 @@
     state.sort = e.target.value;
     renderList();
   });
+  if (retryLoad) {
+    retryLoad.addEventListener('click', () => {
+      state.error = '';
+      fetchCalls();
+    });
+  }
   refreshBtn.addEventListener('click', () => {
     fetchCalls();
     fetchSummaryStats();

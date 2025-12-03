@@ -1,6 +1,8 @@
 package formatting
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,6 +39,33 @@ func TestParseCallMetadataFromFilename(t *testing.T) {
 	if !meta.DateTime.Equal(expectedTime) {
 		t.Fatalf("unexpected datetime: %v", meta.DateTime)
 	}
+}
+
+func TestNormalizeCallCategory(t *testing.T) {
+	if got := NormalizeCallCategory("EMS Alarm"); got != "ems" {
+		t.Fatalf("expected ems, got %s", got)
+	}
+	if got := NormalizeCallCategory("FIRE"); got != "fire" {
+		t.Fatalf("expected fire, got %s", got)
+	}
+	if got := NormalizeCallCategory("Other"); got != "other" {
+		t.Fatalf("expected other, got %s", got)
+	}
+}
+
+func TestBuildListenURL(t *testing.T) {
+	t.Setenv("EXTERNAL_LISTEN_BASE_URL", "")
+	t.Setenv("HTTP_PORT", ":9000")
+	url := BuildListenURL("audio/test.mp3")
+	if !strings.HasPrefix(url, "http://localhost:9000/") {
+		t.Fatalf("unexpected listen URL %s", url)
+	}
+	t.Setenv("EXTERNAL_LISTEN_BASE_URL", "https://example.com/audio")
+	url = BuildListenURL("/audio/test.mp3")
+	if url != "https://example.com/audio/audio/test.mp3" {
+		t.Fatalf("unexpected external listen URL %s", url)
+	}
+	_ = os.Unsetenv("EXTERNAL_LISTEN_BASE_URL")
 }
 
 func TestParseCallMetadataWithExtraTokens(t *testing.T) {

@@ -1,0 +1,8 @@
+{
+  "name": "alert_framework",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test static/*.test.js"
+  }
+}
