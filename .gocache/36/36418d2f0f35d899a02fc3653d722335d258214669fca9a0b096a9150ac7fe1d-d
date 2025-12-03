@@ -1,7 +1,0 @@
-./call_category.go
-./formatting.go
-./geocoder.go
-./incident.go
-./listen_url.go
-./location_parser.go
-./normalize.go

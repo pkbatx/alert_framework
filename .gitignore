@@ -1,0 +1,11 @@
+# Build artifacts and caches
+.gocache/
+.gopath/
+alert_server
+
+# Local data and secrets
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
