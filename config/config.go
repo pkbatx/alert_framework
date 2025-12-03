@@ -29,8 +29,8 @@ type Config struct {
 
 const (
 	defaultPort          = ":8000"
-	defaultCallsDir      = "/home/peebs/calls"
-	defaultWorkDir       = "/home/peebs/ai_transcribe"
+	defaultCallsDir      = "/data/calls"
+	defaultWorkDir       = "/data/work"
 	defaultDBPath        = defaultWorkDir + "/transcriptions.db"
 	minQueueSize         = 1
 	defaultQueueSize     = 100

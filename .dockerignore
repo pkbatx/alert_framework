@@ -1,0 +1,24 @@
+# Build artifacts
+bin
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.log
+
+# Go module files that can be restored
+vendor
+
+# Version control
+.git
+.gitignore
+
+# IDE/editor settings
+.vscode
+.idea
+
+# Caches
+**/__pycache__
