@@ -19,7 +19,7 @@ RUN apt-get update \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /data/calls /data/work
+RUN mkdir -p /data/calls /data/work /data/last24 /data/tmp /alert_framework_data/work
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

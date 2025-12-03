@@ -1,0 +1,203 @@
+Tests running in interp:  C:/Users/0xjnml/AppData/Local/Temp/tcl-test-3097666143/tcltest.exe
+Tests located in:  C:/Users/0xjnml/AppData/Local/Temp/tcl-test-3097666143
+Tests running in:  C:/Users/0xjnml/AppData/Local/Temp/tcl-test-3097666143
+Temporary files stored in C:/Users/0xjnml/AppData/Local/Temp/tcl-test-3097666143
+Test files run in separate interpreters
+Skipping tests that match:  Tcl_Main-4.* Tcl_Main-5.* chan-16.9 chan-io-2* chan-io-3* chan-io-4* chan-io-5* clock-38.2 clock-40.1 clock-42.1 clock-49.2 cmdAH-16* cmdAH-17* cmdAH-19* cmdAH-2.5 cmdAH-20* cmdAH-24* cmdAH-25* event-11* event-12.4 event-7.5 fCmd-10.* fCmd-16.6 fCmd-27.* fCmd-29.* fCmd-3.* fCmd-4.* fCmd-5.* fCmd-6.17 fCmd-9.* filename-10.7 filename-11.* filename-15.* filesystem-1.* filesystem-6.* filesystem-7.* filesystem-9.* info-16.* interp-34.* iocmd-31.* iocmd-32.* iocmd-8.* package-15.* platform-3.1 regexp-22.* safe-8.5 safe-8.6 safe-8.7 safe-stock-7.4 tcltest-5.* tcltest-8.* tcltest-9.5 timer-11.* timer-3.* timer-6.* timer-9.* winFCmd-1.* winFCmd-2.* winFCmd-3.* winFCmd-6.* winFCmd-7.* winFCmd-8.* winFCmd-9.* winNotify-3.* winTime-1.2 winTime-2.1 winpipe-4.* zlib-10.* zlib-8.* zlib-9.*
+Running tests that match:  *
+Skipping test files that match:  env.test exec.test http.test http11.test httpold.test io.test socket.test
+Only running test files that match:  *.test
+Tests began at Thu Jan 01 01:00:00 +0100 1970
+aaa_exit.test
+append.test
+appendComp.test
+apply.test
+assemble.test
+assocd.test
+async.test
+autoMkindex.test
+basic.test
+binary.test
+case.test
+chan.test
+chanio.test
+clock.test
+cmdAH.test
+cmdIL.test
+cmdInfo.test
+cmdMZ.test
+compExpr-old.test
+compExpr.test
+compile.test
+concat.test
+config.test
+coroutine.test
+dcall.test
+dict.test
+dstring.test
+encoding.test
+error.test
+eval.test
+event.test
+execute.test
+expr-old.test
+expr.test
+fCmd.test
+fileName.test
+fileSystem.test
+fileSystemEncoding.test
+for-old.test
+for.test
+foreach.test
+format.test
+get.test
+history.test
+httpPipeline.test
+if-old.test
+if.test
+incr-old.test
+incr.test
+indexObj.test
+info.test
+init.test
+interp.test
+ioCmd.test
+ioTrans.test
+iogt.test
+join.test
+lindex.test
+link.test
+linsert.test
+list.test
+listObj.test
+llength.test
+lmap.test
+load.test
+lrange.test
+lrepeat.test
+lreplace.test
+lsearch.test
+lset.test
+lsetComp.test
+macOSXFCmd.test
+macOSXLoad.test
+main.test
+mathop.test
+misc.test
+msgcat.test
+namespace-old.test
+namespace.test
+notify.test
+nre.test
+obj.test
+oo.test
+ooNext2.test
+opt.test
+package.test
+env array elements created:	TCL_PKG_PREFER_LATEST
+env array elements removed:	_
+parse.test
+parseExpr.test
+parseOld.test
+pid.test
+pkgMkIndex.test
+platform.test
+proc-old.test
+proc.test
+pwd.test
+reg.test
+regexp.test
+regexpComp.test
+registry.test
+rename.test
+resolver.test
+result.test
+safe-stock.test
+safe.test
+scan.test
+security.test
+set-old.test
+set.test
+source.test
+split.test
+stack.test
+string.test
+stringComp.test
+stringObj.test
+subst.test
+switch.test
+tailcall.test
+tcltest.test
+thread.test
+timer.test
+tm.test
+trace.test
+unixFCmd.test
+unixFile.test
+unixForkEvent.test
+unixInit.test
+unixNotfy.test
+unknown.test
+unload.test
+uplevel.test
+upvar.test
+utf.test
+util.test
+var.test
+while-old.test
+while.test
+winConsole.test
+winDde.test
+winFCmd.test
+winFile.test
+winNotify.test
+winPipe.test
+winTime.test
+zlib.test
+
+Tests ended at Thu Jan 01 02:54:32 +0100 1970
+all.tcl:	Total	32711	Passed	28612	Skipped	4099	Failed	0
+Sourced 144 Test Files.
+Number of tests skipped for each constraint:
+	9	!ieeeFloatingPoint
+	76	bigEndian
+	5	bug-3057639
+	22	cat32
+	3	cdrom
+	50	dde
+	1	dontCopyLinks
+	54	emptyTest
+	58	fullutf
+	2	hasIsoLocale
+	1	interactive
+	1	knownBadTest
+	39	knownBug
+	100	localeRegexp
+	15	longIs64bit
+	14	macosxFileAttr
+	82	memory
+	11	nonPortable
+	3	notNetworkFilesystem
+	1	notValgrind
+	1	pairsTo4bytes
+	19	pkga.dllRequired
+	20	pkgua.dllRequired
+	2	pre388
+	126	reg
+	1996	serverNeeded
+	2	sharedCdrive
+	1	slowTest
+	1	testWithLimit
+	1	testexprparser && !ieeeFloatingPoint
+	22	testfilehandler
+	2	testfilewait
+	7	testfindexecutable
+	1	testfork
+	1	testgetdefenc
+	184	thread
+	3	threaded
+	21	ucs4
+	122	unix
+	16	utf16
+	1	win2000orXP
+	6	xdev

@@ -342,6 +342,27 @@ func (s *server) defaultOptions() (TranscriptionOptions, error) {
 	}, nil
 }
 
+func prepareFilesystem(cfg config.Config) error {
+	required := []string{
+		cfg.CallsDir,
+		cfg.WorkDir,
+		filepath.Dir(cfg.DBPath),
+		"/data/last24",
+		"/data/tmp",
+		"/alert_framework_data/work",
+	}
+	for _, dir := range required {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || dir == "." || dir == "/" {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("ensure dir %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -366,6 +387,9 @@ func main() {
 	}
 	if err := os.MkdirAll(cfg.WorkDir, 0755); err != nil {
 		log.Fatalf("failed to ensure work dir: %v", err)
+	}
+	if err := prepareFilesystem(cfg); err != nil {
+		log.Fatalf("filesystem prep failed: %v", err)
 	}
 
 	db, err := openDB(cfg.DBPath)
@@ -491,7 +515,34 @@ func queryRowWithRetry(db *sql.DB, scan func(*sql.Row) error, query string, args
 	})
 }
 
+func ensureDBFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("db path is empty")
+	}
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." && dir != "/" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("ensure db dir: %w", err)
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			f, createErr := os.Create(path)
+			if createErr != nil {
+				return fmt.Errorf("create db file: %w", createErr)
+			}
+			return f.Close()
+		}
+		return fmt.Errorf("stat db file: %w", err)
+	}
+	return nil
+}
+
 func openDB(path string) (*sql.DB, error) {
+	if err := ensureDBFile(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -765,7 +816,12 @@ func (s *server) watch() {
 }
 
 func (s *server) handleNewFile(filename string) {
-	meta, pretty, publicURL, _ := s.buildJobContext(filename)
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		log.Printf("skipping empty filename from watcher")
+		return
+	}
+	meta, _, publicURL, _ := s.buildJobContext(filename)
 	incident := s.buildIncidentDetails(meta, nil, nil, nil, nil, meta.DateTime, filename, publicURL, "")
 	text := formatting.BuildIncidentAlert(incident)
 	if err := s.sendGroupMe(text); err != nil {

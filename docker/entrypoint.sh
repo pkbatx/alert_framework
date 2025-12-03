@@ -15,6 +15,7 @@ for var in OPENAI_API_KEY GROUPME_BOT_ID GROUPME_ACCESS_TOKEN; do
 done
 
 mkdir -p "${CALLS_DIR}" "${WORK_DIR}" "$(dirname "${DB_PATH}")"
+mkdir -p /data/last24 /data/tmp /alert_framework_data/work
 [ -f "${DB_PATH}" ] || touch "${DB_PATH}"
 
 export CALLS_DIR WORK_DIR DB_PATH HTTP_PORT
