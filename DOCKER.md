@@ -36,5 +36,9 @@ docker run --rm \
 - `MAPBOX_TOKEN`: Optional Mapbox access token for mapping features.
 - `AUDIO_FILTER_ENABLED`: Toggle audio preprocessing (`true` by default).
 - `FFMPEG_BIN`: Override the `ffmpeg` binary name/path if needed.
+- `PUBLIC_BASE_URL`: Base URL (scheme, host, and optional path prefix) used when building preview links and webhook payloads. Set this to your public domain when running behind a reverse proxy.
+- `EXTERNAL_LISTEN_BASE_URL`: Optional override for direct audio links sent to webhooks. Use this if audio files are hosted at a different domain or CDN; otherwise `PUBLIC_BASE_URL` (or `http://localhost:HTTP_PORT`) is used.
+
+To customize the prefix used in webhook listen URLs, set `PUBLIC_BASE_URL` to your public domain/path, or `EXTERNAL_LISTEN_BASE_URL` if the audio files live elsewhere.
 
 The entrypoint ensures `CALLS_DIR`, `WORK_DIR`, and `DB_PATH` are initialized before the application starts, making the container easy to run with only environment variables and a mounted data volume.

@@ -1,7 +1,6 @@
 package formatting
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -54,18 +53,26 @@ func TestNormalizeCallCategory(t *testing.T) {
 }
 
 func TestBuildListenURL(t *testing.T) {
-	t.Setenv("EXTERNAL_LISTEN_BASE_URL", "")
 	t.Setenv("HTTP_PORT", ":9000")
+	t.Setenv("EXTERNAL_LISTEN_BASE_URL", "")
+	t.Setenv("PUBLIC_BASE_URL", "")
 	url := BuildListenURL("audio/test.mp3")
 	if !strings.HasPrefix(url, "http://localhost:9000/") {
 		t.Fatalf("unexpected listen URL %s", url)
 	}
+
+	t.Setenv("PUBLIC_BASE_URL", "https://alerts.example.com/media/")
+	t.Setenv("EXTERNAL_LISTEN_BASE_URL", "")
+	url = BuildListenURL("audio/test.mp3")
+	if url != "https://alerts.example.com/media/audio/test.mp3" {
+		t.Fatalf("unexpected public base listen URL %s", url)
+	}
+
 	t.Setenv("EXTERNAL_LISTEN_BASE_URL", "https://example.com/audio")
 	url = BuildListenURL("/audio/test.mp3")
 	if url != "https://example.com/audio/audio/test.mp3" {
 		t.Fatalf("unexpected external listen URL %s", url)
 	}
-	_ = os.Unsetenv("EXTERNAL_LISTEN_BASE_URL")
 }
 
 func TestParseCallMetadataWithExtraTokens(t *testing.T) {

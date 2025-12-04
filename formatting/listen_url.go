@@ -16,10 +16,19 @@ func BuildListenURL(filename string) string {
 	}
 	safeName = strings.Join(segments, "/")
 
-	ext := os.Getenv("EXTERNAL_LISTEN_BASE_URL")
-	if ext != "" {
-		ext = strings.TrimRight(ext, "/")
+	sanitizeBase := func(raw string) string {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return ""
+		}
+		return strings.TrimRight(raw, "/")
+	}
+
+	if ext := sanitizeBase(os.Getenv("EXTERNAL_LISTEN_BASE_URL")); ext != "" {
 		return ext + "/" + safeName
+	}
+	if public := sanitizeBase(os.Getenv("PUBLIC_BASE_URL")); public != "" {
+		return public + "/" + safeName
 	}
 
 	port := strings.TrimSpace(os.Getenv("HTTP_PORT"))

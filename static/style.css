@@ -582,6 +582,71 @@ button:disabled { opacity: 0.6; cursor: not-allowed; box-shadow: none; }
 [data-theme="light"] .mapboxgl-ctrl-group { background: rgba(255,255,255,0.95); }
 .mapboxgl-ctrl button { filter: invert(1) grayscale(1); }
 
+.hotspot-widget {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  background: rgba(124, 231, 255, 0.04);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+}
+
+.hotspot-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.hotspot-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hotspot-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(11, 16, 33, 0.55);
+}
+
+[data-theme="light"] .hotspot-list li {
+  background: rgba(255,255,255,0.85);
+}
+
+.hotspot-list .label {
+  display: flex;
+  flex-direction: column;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.hotspot-list .meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.hotspot-count {
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.hotspot-empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 8px 0;
+}
+
 .tag-row { display: flex; gap: 8px; flex-wrap: wrap; min-height: 38px; }
 .filter-chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
 .chip { border: 1px solid var(--border); background: rgba(124,231,255,0.08); color: var(--text); border-radius: 999px; padding:6px 10px; cursor: pointer; }

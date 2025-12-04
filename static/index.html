@@ -26,42 +26,41 @@
           <button data-window="72h">Last 72h</button>
           <button data-window="all">All</button>
         </div>
-        <button id="theme-toggle" class="ghost" type="button" aria-label="Toggle theme">🌙 Dark</button>
       </div>
     </div>
 
     <section class="summary-bar" aria-label="Activity overview">
       <div class="summary-chip" id="summary-window">Last 6h</div>
       <div class="summary-metric">
-        <p class="eyebrow">Total incidents</p>
+        <p class="eyebrow">Incidents logged</p>
         <strong id="summary-total">—</strong>
-        <span class="muted" id="summary-window-hint">Past six hours</span>
+        <span class="muted" id="summary-window-hint">Current window</span>
       </div>
       <div class="summary-metric">
-        <p class="eyebrow">Top type</p>
+        <p class="eyebrow">Most common type</p>
         <strong id="summary-top-type">—</strong>
-        <span class="muted">Most frequent incident</span>
+        <span class="muted">Most frequent incident type</span>
       </div>
       <div class="summary-metric">
-        <p class="eyebrow">Busiest agency</p>
+        <p class="eyebrow">Leading agency</p>
         <strong id="summary-agency">—</strong>
-        <span class="muted">Calls handled</span>
+        <span class="muted">Calls handled this window</span>
       </div>
       <div class="summary-metric">
-        <p class="eyebrow">Queue vs. completed</p>
+        <p class="eyebrow">Queue status</p>
         <strong id="summary-status">—</strong>
-        <span class="muted">Live job balance</span>
+        <span class="muted">Live transcription load</span>
       </div>
     </section>
 
     <section class="controls">
       <div class="primary-controls">
         <div class="field search-field">
-          <label for="search">Search everything</label>
+          <label for="search">Search incidents</label>
           <div class="search-stack">
-            <input id="search" type="search" placeholder="Ask for towns, tags, agencies, or filenames" />
+            <input id="search" type="search" placeholder="Search towns, agencies, tags, or filenames" />
             <div class="suggestions" id="search-suggestions" aria-live="polite">
-              <span class="muted">Suggested:</span>
+              <span class="muted">Trending:</span>
               <div class="suggestion-row">
                 <button type="button" data-value="Newton EMS">Newton EMS</button>
                 <button type="button" data-value="Andover">Andover</button>
@@ -73,7 +72,7 @@
           </div>
         </div>
         <div class="control-buttons">
-          <button id="toggle-advanced" class="ghost" type="button">Advanced filters</button>
+          <button id="toggle-advanced" class="ghost" type="button">Filters</button>
           <button id="refresh" class="ghost" type="button">Refresh</button>
         </div>
       </div>
@@ -86,8 +85,8 @@
       <div class="drawer-panel" role="dialog" aria-labelledby="filters-title">
         <div class="drawer-header">
           <div>
-            <p class="eyebrow">Precision targeting</p>
-            <h3 id="filters-title">Advanced filters</h3>
+            <p class="eyebrow">Filters</p>
+            <h3 id="filters-title">Incident filters</h3>
           </div>
           <button id="close-filters" class="ghost" type="button">Close</button>
         </div>
@@ -103,7 +102,7 @@
             </select>
           </div>
           <div class="field">
-            <label for="call-type">Call type</label>
+            <label for="call-type">Incident type</label>
             <select id="call-type">
               <option value="">Any</option>
             </select>
@@ -135,23 +134,31 @@
         <div class="panel map-panel">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Geography</p>
-              <h2>Map + markers</h2>
-              <p class="muted">Uses stored lat/lng from transcripts; clicking a call recenters the map.</p>
+              <p class="eyebrow">Incident map</p>
+              <h2>Activity heatmap</h2>
+              <p class="muted">Visualizes recent call density and hotspots. Selecting a call recenters the map.</p>
             </div>
             <div class="map-controls" role="group" aria-label="Map layers">
-              <button type="button" id="map-layer-density" class="ghost active">Density</button>
-              <button type="button" id="map-layer-points" class="ghost">Points</button>
+              <button type="button" id="map-layer-density" class="ghost active">Heatmap</button>
+              <button type="button" id="map-layer-points" class="ghost">Map pins</button>
+              <button type="button" id="map-layer-hotspots" class="ghost active">Hotspots</button>
             </div>
           </div>
           <div id="map-chart" class="chart map-chart"></div>
+          <div class="hotspot-widget" aria-live="polite">
+            <div class="hotspot-header">
+              <p class="eyebrow">Hotspot clusters</p>
+              <span class="muted" id="hotspot-hint">Rolling 30 days</span>
+            </div>
+            <ul id="hotspot-list" class="hotspot-list"></ul>
+          </div>
         </div>
 
         <aside class="panel list-panel">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Calls</p>
-              <h2 id="list-caption">Recent calls</h2>
+              <p class="eyebrow">Incident feed</p>
+              <h2 id="list-caption">Latest incidents</h2>
             </div>
             <span id="total-count" class="muted"></span>
           </div>
@@ -161,18 +168,17 @@
             <p class="muted">Unable to load incidents.</p>
             <button id="retry-load" type="button" class="ghost">Retry</button>
           </div>
-          <div id="empty-state" class="empty hidden">No calls in this window yet.</div>
+          <div id="empty-state" class="empty hidden">No incidents in this window yet.</div>
         </aside>
       </section>
 
       <section class="panel detail-panel">
         <div class="panel-header">
           <div>
-            <p class="eyebrow">Details</p>
-            <h2 id="detail-title">Select a call</h2>
-            <p id="detail-meta" class="muted">Choose a call to preview audio and transcript.</p>
+            <p class="eyebrow">Call details</p>
+            <h2 id="detail-title">Select an incident</h2>
+            <p id="detail-meta" class="muted">Pick an incident to review audio and transcript.</p>
           </div>
-          <button id="regen" class="ghost" disabled>Regenerate</button>
         </div>
         <div class="detail-body">
           <div class="meta-row">
@@ -181,31 +187,31 @@
               <strong id="detail-status">—</strong>
             </div>
             <div>
-              <p class="muted">Call type</p>
+              <p class="muted">Incident type</p>
               <strong id="detail-type">—</strong>
             </div>
             <div>
-              <p class="muted">Agency/Town</p>
+              <p class="muted">Agency</p>
               <strong id="detail-agency">—</strong>
             </div>
           </div>
 
-          <p id="detail-location" class="muted">Location unavailable</p>
+          <p id="detail-location" class="muted">Location not yet available</p>
 
           <div class="incident-summary">
             <div class="summary-header">
-              <p class="muted">Summary</p>
-              <span id="detail-warning" class="badge warning hidden">Metadata incomplete</span>
+              <p class="muted">Transcript summary</p>
+              <span id="detail-warning" class="badge warning hidden">Missing details</span>
             </div>
-            <p id="detail-summary" class="incident-summary__body">No summary available.</p>
+            <p id="detail-summary" class="incident-summary__body">Select an incident to view its summary.</p>
           </div>
 
           <div class="player">
             <div id="waveform" aria-label="Waveform player"></div>
             <div class="player-actions">
               <button id="play" disabled>Play/Pause</button>
-              <a id="download" class="ghost" target="_blank" rel="noopener">Open audio</a>
-              <label class="checkbox"><input type="checkbox" id="highlight-toggle" /> Highlight transcript while playing</label>
+              <a id="download" class="ghost" target="_blank" rel="noopener">Download audio</a>
+              <label class="checkbox"><input type="checkbox" id="highlight-toggle" /> Highlight transcript during playback</label>
             </div>
           </div>
 
@@ -216,17 +222,17 @@
               <h3>Transcript</h3>
               <span id="updated-at" class="muted"></span>
             </div>
-            <div id="transcript-text" class="transcript-text">Pick a call to read the transcript.</div>
+            <div id="transcript-text" class="transcript-text">Select an incident to read the transcript.</div>
           </div>
         </div>
       </section>
     </main>
     <footer class="status-bar" aria-label="System status">
-      <div class="status-pill online">Connected</div>
-      <span class="muted">Data-source: queue + mapbox + transcripts</span>
+      <div class="status-pill online">Live connection</div>
+      <span class="muted">Data sources: Live queue • Mapbox • Transcripts</span>
       <div class="status-actions">
-        <button class="ghost" type="button">Settings</button>
-        <button class="ghost" type="button">Profile</button>
+        <button class="ghost" type="button">System settings</button>
+        <button class="ghost" type="button">Account</button>
       </div>
     </footer>
   </div>

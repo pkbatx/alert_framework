@@ -1,10 +1,6 @@
 
 Authoritative architecture reference
-This defines how every agent behaves inside the system, while preserving all core backend behaviors: watcher, queue, workers, OpenAI transcription pipeline, GroupMe notifications, prettified formatting, DB storage, and UI operations.
-
-The only change from the original architecture is:
-There is no automatic backfill scanner. All historical processing is handled by a one-time helper script.
-The main service handles live calls forward-only.
+This defines how every agent behaves inside the system, while preserving all core backend behaviors: watcher, queue, workers, OpenAI transcription pipeline, GroupMe notifications, prettified formatting, DB storage, and UI operations. The main service focuses on live calls moving forward.
 
 ⸻
 
@@ -19,14 +15,12 @@ Core behaviors that remain unchanged:
 	•	Send the “call transcript” follow-up message.
 	•	Track all data in a SQLite DB.
 	•	Serve a UI that defaults to the last 24 hours of call activity.
-	•	Allow on-demand regeneration of transcripts through UI-triggered jobs.
 
 Enhancements introduced:
 	•	Embedded in-page WaveSurfer.js audio playback.
 	•	Simplified filtering: last 24h, last 7d, last 30d.
 	•	Tag-based filtering and lightweight Plotly visual summaries.
-	•	A manual one-time helper script handles historical backfill and is run externally.
-	•	The main server’s logic is forward-only once the helper completes.
+	•	Forward-only operation with no bundled historical backfill tooling.
 
 ⸻
 
@@ -170,7 +164,6 @@ Agent: MonitorUI
 Responsibilities
 	•	Show call list filtered by 24h, 7d, 30d windows.
 	•	Allow tag filtering (derived from call metadata or transcript content where available).
-	•	Provide regeneration triggers (enqueue "transcription_regen" jobs).
 	•	Display call details, metadata, transcript, and job status.
 
 Guarantees
@@ -216,32 +209,13 @@ Guarantees
 
 ⸻
 
-4. One-Time Backfill Helper (External Script)
-
-Agent: BackfillHelper
-
-Responsibilities
-	•	Run manually, outside the main service.
-	•	Scan CALLS_DIR once.
-	•	Identify .mp3 files without DB entries or transcripts.
-	•	Request transcripts through the service’s API or direct queue injection (Codex determines optimal design).
-	•	Exit after completing backfill.
-
-Guarantees
-	•	The main service does not include any automatic backfill logic.
-	•	This script is the only place where historical ingestion occurs.
-	•	After running once, the service operates forward-only.
-
-⸻
-
-5. API Router
+4. API Router
 
 Responsibilities
 	•	Serve main UI.
 	•	Provide endpoints for:
 	•	Call lists (with time window + tag filters).
 	•	Call details.
-	•	Transcript regeneration trigger.
 	•	Queue metrics.
 	•	Health endpoints.
 
@@ -250,18 +224,17 @@ Guarantees
 
 ⸻
 
-6. Lifecycle & Idempotency
+5. Lifecycle & Idempotency
 
 Rules preserved exactly:
 	•	Initial alert sent once per file.
 	•	Transcript alerts only after successful transcription.
-	•	Regeneration must be explicit.
 	•	DB rows keyed by filename/path.
 	•	Queue is the only execution engine for work.
 
 ⸻
 
-7. Extension Guidelines
+6. Extension Guidelines
 
 Any future features must:
 	•	Preserve the ingest → metadata → alert → DB → transcription → second alert lifecycle.

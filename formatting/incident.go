@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // IncidentDetails represents the human-facing view of an incident used across UI and webhooks.
@@ -25,6 +26,8 @@ type IncidentDetails struct {
 	AudioPath     string
 	AudioFilename string
 }
+
+var callClassSeparator = strings.NewReplacer("_", " ", "-", " ", "/", " ")
 
 // FormatIncidentHeader renders a concise incident header.
 func FormatIncidentHeader(incident IncidentDetails) string {
@@ -71,25 +74,42 @@ func FormatIncidentLocation(incident IncidentDetails) string {
 
 // BuildIncidentAlert constructs a GroupMe-friendly alert body.
 func BuildIncidentAlert(incident IncidentDetails) string {
-	var lines []string
-	header := FormatIncidentHeader(incident)
-	if header != "" {
-		lines = append(lines, header)
+	ts := incident.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+
+	emoji := incidentCategoryEmoji(incident.CallCategory)
+	primary := primaryServiceLabel(incident.CallCategory)
+	callClass, hasSpecific := callClassLabel(incident.CallType)
+	categoryShort := categoryShortLabel(primary, callClass, hasSpecific)
+
+	agency := strings.TrimSpace(incident.Agency)
+	if agency == "" {
+		agency = "Unknown agency"
 	}
 
 	location := FormatIncidentLocation(incident)
-	if location != "" {
-		lines = append(lines, location)
+	audio := strings.TrimSpace(incident.ListenURL)
+	if audio == "" {
+		audio = "Not available"
 	}
-
 	summary := strings.TrimSpace(incident.Summary)
-	if summary != "" {
-		lines = append(lines, summary)
+	if summary == "" {
+		summary = "Transcript pending."
 	}
 
-	listen := strings.TrimSpace(incident.ListenURL)
-	if listen != "" {
-		lines = append(lines, fmt.Sprintf("Listen: %s", listen))
+	lines := []string{
+		fmt.Sprintf("%s %s – %s", emoji, agency, categoryShort),
+		"",
+		fmt.Sprintf("📍 Location: %s", location),
+		fmt.Sprintf("🏷️ Type: %s – %s", primary, callClass),
+		fmt.Sprintf("🕒 Time: %s", ts.Format("2006-01-02 15:04:05")),
+		"",
+		"Transcript:",
+		summary,
+		"",
+		fmt.Sprintf("🎧 Audio: %s", audio),
 	}
 
 	return strings.Join(lines, "\n")
@@ -104,4 +124,59 @@ func formatCategoryPrefix(callCategory string) string {
 	default:
 		return "🚨 INCIDENT"
 	}
+}
+
+func incidentCategoryEmoji(callCategory string) string {
+	switch NormalizeCallCategory(callCategory) {
+	case "ems":
+		return "🚑"
+	case "fire":
+		return "🚒"
+	default:
+		return "🚨"
+	}
+}
+
+func primaryServiceLabel(callCategory string) string {
+	switch NormalizeCallCategory(callCategory) {
+	case "ems":
+		return "EMS"
+	case "fire":
+		return "Fire"
+	default:
+		return "Incident"
+	}
+}
+
+func callClassLabel(callType string) (string, bool) {
+	value := strings.TrimSpace(callType)
+	if value == "" {
+		return "General", false
+	}
+	value = callClassSeparator.Replace(value)
+	words := strings.Fields(value)
+	if len(words) == 0 {
+		return "General", false
+	}
+	for i, w := range words {
+		words[i] = capitalizeWord(w)
+	}
+	return strings.Join(words, " "), true
+}
+
+func categoryShortLabel(primary, callClass string, hasSpecific bool) string {
+	if hasSpecific && callClass != "" {
+		return fmt.Sprintf("%s/%s", primary, callClass)
+	}
+	return primary
+}
+
+func capitalizeWord(word string) string {
+	lowered := strings.ToLower(word)
+	runes := []rune(lowered)
+	if len(runes) == 0 {
+		return word
+	}
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
 }

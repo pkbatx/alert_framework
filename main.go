@@ -274,6 +274,20 @@ type callListResponse struct {
 	MapboxToken string                  `json:"mapbox_token,omitempty"`
 }
 
+type hotspotSummary struct {
+	Label     string     `json:"label"`
+	Latitude  float64    `json:"latitude"`
+	Longitude float64    `json:"longitude"`
+	Count     int        `json:"count"`
+	FirstSeen *time.Time `json:"first_seen,omitempty"`
+	LastSeen  *time.Time `json:"last_seen,omitempty"`
+}
+
+type hotspotListResponse struct {
+	Window   string           `json:"window"`
+	Hotspots []hotspotSummary `json:"hotspots"`
+}
+
 type processJob struct {
 	filename    string
 	source      string
@@ -426,6 +440,7 @@ func main() {
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/stats/last6h", s.handleLastSixHoursStats)
+	mux.HandleFunc("/api/hotspots", s.handleHotspots)
 	mux.HandleFunc("/preview/", s.handlePreview)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
@@ -576,6 +591,7 @@ func initDB(db *sql.DB) error {
 		{version: 3, name: "add call metadata columns", up: migrateAddCallMetadata},
 		{version: 4, name: "add location columns", up: migrateAddLocationColumns},
 		{version: 5, name: "add processed audio path", up: migrateAddProcessedPath},
+		{version: 6, name: "normalize call timestamps to utc", up: migrateNormalizeCallTimestampUTC},
 	}
 	return applyMigrations(db, migrations)
 }
@@ -752,6 +768,81 @@ func migrateAddProcessedPath(db *sql.DB) error {
 	return err
 }
 
+func migrateNormalizeCallTimestampUTC(db *sql.DB) error {
+	rows, err := queryWithRetry(db, `SELECT filename, call_timestamp FROM transcriptions WHERE call_timestamp IS NOT NULL AND TRIM(call_timestamp) != ''`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type pendingUpdate struct {
+		filename string
+		ts       time.Time
+	}
+	var updates []pendingUpdate
+
+	tz, err := time.LoadLocation("EST5EDT")
+	if err != nil {
+		tz = time.FixedZone("EST", -5*60*60)
+	}
+
+	for rows.Next() {
+		var filename string
+		var raw sql.NullString
+		if err := rows.Scan(&filename, &raw); err != nil {
+			return err
+		}
+		value := strings.TrimSpace(raw.String)
+		if value == "" {
+			continue
+		}
+		ts, err := parseTimestampFlexible(value, tz)
+		if err != nil {
+			continue
+		}
+		updates = append(updates, pendingUpdate{filename: filename, ts: ts.UTC()})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, upd := range updates {
+		if _, err := execWithRetry(db, `UPDATE transcriptions SET call_timestamp = ? WHERE filename = ?`, upd.ts, upd.filename); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func parseTimestampFlexible(raw string, tz *time.Location) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("empty timestamp")
+	}
+	layoutsWithZone := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.000000-07:00",
+	}
+	for _, layout := range layoutsWithZone {
+		if ts, err := time.Parse(layout, raw); err == nil {
+			return ts, nil
+		}
+	}
+	layoutsLocal := []string{
+		"2006-01-02 15:04:05.000000000",
+		"2006-01-02 15:04:05.000000",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layoutsLocal {
+		if ts, err := time.ParseInLocation(layout, raw, tz); err == nil {
+			return ts, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unable to parse timestamp %q", raw)
+}
+
 func addColumnIfMissing(db *sql.DB, table, column, colType string) error {
 	rows, err := queryWithRetry(db, fmt.Sprintf("PRAGMA table_info(%s);", table))
 	if err != nil {
@@ -821,12 +912,6 @@ func (s *server) handleNewFile(filename string) {
 		log.Printf("skipping empty filename from watcher")
 		return
 	}
-	meta, _, publicURL, _ := s.buildJobContext(filename)
-	incident := s.buildIncidentDetails(meta, nil, nil, nil, nil, meta.DateTime, filename, publicURL, "")
-	text := formatting.BuildIncidentAlert(incident)
-	if err := s.sendGroupMe(text); err != nil {
-		log.Printf("groupme send failed: %v", err)
-	}
 	opts, _ := s.defaultOptions()
 	s.queueJob("watcher", filename, true, false, opts)
 }
@@ -883,12 +968,13 @@ func (s *server) enqueueWithBackoff(ctx context.Context, source, filename string
 	if err := s.markQueued(filename, sourcePath, source, 0, opts, meta.DateTime); err != nil {
 		log.Printf("mark queued failed for %s: %v", filename, err)
 	}
+	jobPayload := processJob{filename: filename, source: source, sendGroupMe: sendGroupMe, force: force, options: opts, meta: meta, prettyTitle: pretty, publicURL: publicURL, baseURL: baseURL}
 	job := queue.Job{
 		ID:       filename,
 		FileName: filename,
 		Source:   source,
 		Work: func(ctx context.Context) error {
-			return s.processFile(ctx, processJob{filename: filename, source: source, sendGroupMe: sendGroupMe, force: force, options: opts, meta: meta, prettyTitle: pretty, publicURL: publicURL, baseURL: baseURL})
+			return s.processWithRetry(ctx, jobPayload, 2)
 		},
 		OnFinish: func(err error) {
 			s.running.Delete(filename)
@@ -993,6 +1079,58 @@ func ProcessAudioWithFFmpeg(ctx context.Context, rawPath string) (string, error)
 
 	log.Printf("ffmpeg processed audio input=%s output=%s duration_ms=%d", rawPath, processedPath, time.Since(start).Milliseconds())
 	return processedPath, nil
+}
+
+func (s *server) processWithRetry(ctx context.Context, job processJob, attempts int) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * time.Second
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+			log.Printf("retrying transcription for %s (attempt %d/%d)", job.filename, attempt+1, attempts)
+		}
+		if err := s.processFile(ctx, job); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if job.sendGroupMe && lastErr != nil {
+		s.notifyTranscriptionFailure(job, lastErr)
+	}
+	return lastErr
+}
+
+func (s *server) notifyTranscriptionFailure(job processJob, cause error) {
+	message := "transcription failed"
+	if cause != nil {
+		message = strings.TrimSpace(cause.Error())
+		if len(message) > 160 {
+			message = message[:157] + "…"
+		}
+	}
+	listenURL := strings.TrimSpace(job.publicURL)
+	if listenURL == "" {
+		listenURL = formatting.BuildListenURL(job.filename)
+	}
+	callTime := job.meta.DateTime
+	if callTime.IsZero() {
+		callTime = time.Now().In(s.tz)
+	}
+	incident := s.buildIncidentDetails(job.meta, nil, nil, nil, nil, callTime, job.filename, listenURL, "")
+	header := formatting.FormatIncidentHeader(incident)
+	location := formatting.FormatIncidentLocation(incident)
+	body := fmt.Sprintf("%s\n%s\n⚠️ Transcript unavailable (%s)\nListen: %s", strings.TrimSpace(header), strings.TrimSpace(location), message, listenURL)
+	if err := s.sendGroupMe(body); err != nil {
+		log.Printf("groupme failure alert failed: %v", err)
+	}
 }
 
 func (s *server) processFile(ctx context.Context, j processJob) error {
@@ -1108,28 +1246,47 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	var locationLabel *string
 	var locationSource *string
 	var resolvedLocation *locationGuess
+	candidateRecord := transcription{
+		Filename:             filename,
+		NormalizedTranscript: normalized,
+		CleanTranscript:      &cleanedTranscript,
+		RawTranscript:        &rawTranscript,
+		RecognizedTowns:      towns,
+		CallType:             callType,
+		TagsJSON:             tagsJSON,
+	}
+	applyLocationGuess := func(guess *locationGuess) {
+		if guess == nil {
+			return
+		}
+		resolvedLocation = guess
+		if guess.Label != "" {
+			label := guess.Label
+			locationLabel = &label
+		}
+		if guess.Source != "" {
+			source := guess.Source
+			locationSource = &source
+		}
+		if guess.Latitude != 0 || guess.Longitude != 0 {
+			lat := guess.Latitude
+			lon := guess.Longitude
+			latPtr = &lat
+			lonPtr = &lon
+		}
+		s.locationCache.Store(filename, guess)
+	}
 	if normalized != nil {
 		locCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		resolved := s.parseAndGeocodeLocation(locCtx, *normalized, j.meta)
 		cancel()
-		if resolved != nil {
-			resolvedLocation = resolved
-			if resolved.Label != "" {
-				label := resolved.Label
-				locationLabel = &label
-			}
-			if resolved.Source != "" {
-				source := resolved.Source
-				locationSource = &source
-			}
-			if resolved.Latitude != 0 || resolved.Longitude != 0 {
-				lat := resolved.Latitude
-				lon := resolved.Longitude
-				latPtr = &lat
-				lonPtr = &lon
-			}
-			s.locationCache.Store(filename, resolved)
-		}
+		applyLocationGuess(resolved)
+	}
+	if resolvedLocation == nil {
+		applyLocationGuess(s.deriveLocation(candidateRecord, j.meta))
+	}
+	if resolvedLocation == nil {
+		applyLocationGuess(s.historicalHotspot(j.meta, recognized))
 	}
 
 	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType, tagsJSON, latPtr, lonPtr, locationLabel, locationSource); err != nil {
@@ -1152,9 +1309,8 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			callTime = time.Now().In(s.tz)
 		}
 		incident := s.buildIncidentDetails(j.meta, callType, tagsList, resolvedLocation, recognized, callTime, audioName, formatting.BuildListenURL(audioName), cleanedTranscript)
-		header := formatting.FormatIncidentHeader(incident)
-		followup := fmt.Sprintf("%s\n\nTranscript:\n%s", header, cleanedTranscript)
-		if err := s.sendGroupMe(followup); err != nil {
+		alertBody := formatting.BuildIncidentAlert(incident)
+		if err := s.sendGroupMe(alertBody); err != nil {
 			log.Printf("groupme follow-up failed: %v", err)
 		}
 	}
@@ -2279,6 +2435,89 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 	respondJSON(w, stats)
 }
 
+func (s *server) handleHotspots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rawWindow := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("window")))
+	windowName, windowDuration := normalizeWindowName(rawWindow, "30d")
+
+	limit := 15
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 && parsed <= 200 {
+			limit = parsed
+		}
+	}
+
+	clauses := []string{
+		"status = 'done'",
+		"location_label IS NOT NULL",
+		"TRIM(location_label) != ''",
+		"latitude IS NOT NULL",
+		"longitude IS NOT NULL",
+	}
+	args := []interface{}{}
+	if windowDuration > 0 {
+		cutoff := time.Now().UTC().Add(-windowDuration)
+		clauses = append(clauses, "COALESCE(call_timestamp, created_at) >= ?")
+		args = append(args, cutoff)
+	}
+
+	query := fmt.Sprintf(`SELECT location_label, latitude, longitude, COUNT(*) AS freq,
+       MIN(COALESCE(call_timestamp, created_at)) AS first_seen,
+       MAX(COALESCE(call_timestamp, created_at)) AS last_seen
+FROM transcriptions
+WHERE %s
+GROUP BY location_label, latitude, longitude
+ORDER BY freq DESC, last_seen DESC
+LIMIT ?`, strings.Join(clauses, " AND "))
+	args = append(args, limit)
+
+	rows, err := queryWithRetry(s.db, query, args...)
+	if err != nil {
+		log.Printf("hotspot query failed: %v", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var hotspots []hotspotSummary
+	for rows.Next() {
+		var label string
+		var lat, lon float64
+		var count int
+		var firstSeen, lastSeen sql.NullTime
+		if err := rows.Scan(&label, &lat, &lon, &count, &firstSeen, &lastSeen); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		entry := hotspotSummary{
+			Label:     label,
+			Latitude:  lat,
+			Longitude: lon,
+			Count:     count,
+		}
+		if firstSeen.Valid {
+			ts := firstSeen.Time
+			entry.FirstSeen = &ts
+		}
+		if lastSeen.Valid {
+			ts := lastSeen.Time
+			entry.LastSeen = &ts
+		}
+		hotspots = append(hotspots, entry)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("hotspot rows error: %v", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	respondJSON(w, hotspotListResponse{Window: windowName, Hotspots: hotspots})
+}
+
 func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2883,6 +3122,9 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 		if location == nil {
 			location = s.deriveLocation(t, meta)
 		}
+		if location == nil {
+			location = s.historicalHotspot(meta, recognized)
+		}
 	}
 
 	normalizedText := derefString(t.NormalizedTranscript, derefString(t.CleanTranscript, derefString(t.Transcript, "")))
@@ -3079,6 +3321,83 @@ func (s *server) buildLocationCandidates(t transcription, meta formatting.CallMe
 	add("Sussex County, NJ")
 
 	return candidates
+}
+
+func (s *server) historicalHotspot(meta formatting.CallMetadata, recognized []string) *locationGuess {
+	keys := make([]string, 0, 4+len(recognized))
+	seen := make(map[string]struct{})
+	addKey := func(value string) {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		keys = append(keys, value)
+	}
+	addKey(meta.TownDisplay)
+	addKey(meta.AgencyDisplay)
+	for _, town := range recognized {
+		addKey(town)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(keys))
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	subquery := fmt.Sprintf(`EXISTS (
+    SELECT 1 FROM json_each(COALESCE(tags, '[]'))
+    WHERE lower(json_each.value) IN (%s)
+)`, strings.Join(placeholders, ","))
+
+	historyCutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	args := make([]interface{}, 0, len(keys)+2)
+	args = append(args, statusDone)
+	for _, key := range keys {
+		args = append(args, key)
+	}
+	args = append(args, historyCutoff)
+
+	query := fmt.Sprintf(`SELECT location_label, latitude, longitude, COUNT(*) AS freq,
+       MAX(COALESCE(call_timestamp, created_at)) AS last_seen
+FROM transcriptions
+WHERE status = ? AND location_label IS NOT NULL AND TRIM(location_label) != ''
+  AND latitude IS NOT NULL AND longitude IS NOT NULL
+  AND %s
+  AND COALESCE(call_timestamp, created_at) >= ?
+GROUP BY location_label, latitude, longitude
+ORDER BY freq DESC, last_seen DESC
+LIMIT 1`, subquery)
+
+	var label string
+	var lat, lon float64
+	var freq int
+	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
+		return row.Scan(&label, &lat, &lon, &freq)
+	}, query, args...); err != nil {
+		return nil
+	}
+
+	label = strings.TrimSpace(label)
+	if label == "" || (lat == 0 && lon == 0) {
+		return nil
+	}
+	precision := "historical_hotspot"
+	if freq > 1 {
+		precision = fmt.Sprintf("historical_hotspot_%d", freq)
+	}
+	return &locationGuess{
+		Label:     label,
+		Latitude:  lat,
+		Longitude: lon,
+		Precision: precision,
+		Source:    "historical_hotspot",
+	}
 }
 
 func buildGeocodeQuery(raw string) string {
@@ -3328,6 +3647,7 @@ func (s *server) markQueued(filename, sourcePath, source string, size int64, opt
 	if callTimestamp.IsZero() {
 		callTimestamp = time.Now().In(s.tz)
 	}
+	callTimestamp = callTimestamp.UTC()
 	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, processed_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format, call_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, processed_path=COALESCE(excluded.processed_path, transcriptions.processed_path), ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=COALESCE(excluded.size_bytes, transcriptions.size_bytes), requested_model=COALESCE(excluded.requested_model, transcriptions.requested_model), requested_mode=COALESCE(excluded.requested_mode, transcriptions.requested_mode), requested_format=COALESCE(excluded.requested_format, transcriptions.requested_format), call_timestamp=COALESCE(transcriptions.call_timestamp, excluded.call_timestamp)`, filename, sourcePath, sourcePath, source, statusQueued, sizeVal, opts.Model, opts.Mode, opts.Format, callTimestamp)
 	return err
@@ -3338,6 +3658,7 @@ func (s *server) markProcessing(filename, sourcePath, source string, size int64,
 	if callTimestamp.IsZero() {
 		callTimestamp = time.Now().In(s.tz)
 	}
+	callTimestamp = callTimestamp.UTC()
 	_, err := execWithRetry(s.db, `INSERT INTO transcriptions (filename, source_path, processed_path, ingest_source, status, size_bytes, requested_model, requested_mode, requested_format, call_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(filename) DO UPDATE SET status=excluded.status, source_path=excluded.source_path, processed_path=COALESCE(excluded.processed_path, transcriptions.processed_path), ingest_source=COALESCE(excluded.ingest_source, transcriptions.ingest_source), size_bytes=excluded.size_bytes, requested_model=excluded.requested_model, requested_mode=excluded.requested_mode, requested_format=excluded.requested_format, call_timestamp=COALESCE(transcriptions.call_timestamp, excluded.call_timestamp)`, filename, sourcePath, sourcePath, source, statusProcessing, size, opts.Model, opts.Mode, opts.Format, callTimestamp)
 	return err

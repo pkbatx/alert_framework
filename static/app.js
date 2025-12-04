@@ -19,7 +19,6 @@ import {
   const sortSelect = document.getElementById('sort');
   const refreshBtn = document.getElementById('refresh');
   const windowButtons = document.querySelectorAll('.window-switcher button');
-  const regenBtn = document.getElementById('regen');
   const playBtn = document.getElementById('play');
   const downloadLink = document.getElementById('download');
   const waveformEl = document.getElementById('waveform');
@@ -38,7 +37,6 @@ import {
   const updatedAtEl = document.getElementById('updated-at');
   const tagFilterEl = document.getElementById('tag-filter');
   const filterChips = document.getElementById('filter-chips');
-  const themeToggle = document.getElementById('theme-toggle');
   const toggleAdvancedBtn = document.getElementById('toggle-advanced');
   const advancedFilters = document.getElementById('advanced-filters');
   const filtersDrawer = document.getElementById('filters-drawer');
@@ -46,14 +44,16 @@ import {
   const closeFiltersBtn = document.getElementById('close-filters');
   const mapLayerDensity = document.getElementById('map-layer-density');
   const mapLayerPoints = document.getElementById('map-layer-points');
+  const mapLayerHotspots = document.getElementById('map-layer-hotspots');
   const summaryTotal = document.getElementById('summary-total');
   const summaryTopType = document.getElementById('summary-top-type');
   const summaryAgency = document.getElementById('summary-agency');
   const summaryStatus = document.getElementById('summary-status');
   const summaryWindow = document.getElementById('summary-window');
   const summaryWindowHint = document.getElementById('summary-window-hint');
-  const themeColorMeta = document.getElementById('theme-color-meta');
   const suggestionList = document.getElementById('search-suggestions');
+  const hotspotListEl = document.getElementById('hotspot-list');
+  const hotspotHint = document.getElementById('hotspot-hint');
 
   const state = {
     window: '6h',
@@ -71,43 +71,28 @@ import {
     segments: [],
     mapboxToken: '',
     map: null,
-    theme: 'dark',
-    mapLayerVisibility: { density: true, points: false },
+    mapLayerVisibility: { density: true, points: false, hotspots: true },
     mapGeoJSON: { type: 'FeatureCollection', features: [] },
+    hotspotGeoJSON: { type: 'FeatureCollection', features: [] },
+    hotspots: [],
     pollTimer: null,
+    autoRefreshTimer: null,
+    summaryRefreshTimer: null,
+    hotspotRefreshTimer: null,
     inlineAudio: null,
     mapResizeTimer: null,
     activePopup: null,
     loading: false,
     error: '',
+    fetchingCalls: null,
   };
 
   const MAP_DEFAULT_CENTER = [-74.696, 41.05];
   const MAP_DEFAULT_ZOOM = 8;
-  const THEME_STORAGE_KEY = 'alert-dashboard-theme';
-
-  function applyTheme(nextTheme) {
-    const theme = nextTheme === 'light' ? 'light' : 'dark';
-    state.theme = theme;
-    document.body.dataset.theme = theme;
-    if (themeToggle) themeToggle.textContent = theme === 'dark' ? '🌙 Dark' : '☀️ Light';
-    if (themeColorMeta) themeColorMeta.setAttribute('content', theme === 'dark' ? '#080c1c' : '#f7f9fd');
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
-    if (state.map) {
-      const style = theme === 'light' ? 'mapbox://styles/mapbox/light-v11' : 'mapbox://styles/mapbox/dark-v11';
-      state.map.setStyle(style);
-      state.map.once('styledata', () => {
-        ensureMapSource();
-        refreshMapLayers();
-      });
-    }
-  }
-
-  function initializeTheme() {
-    const saved = localStorage.getItem(THEME_STORAGE_KEY);
-    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    applyTheme(saved || (prefersDark ? 'dark' : 'light'));
-  }
+  const MAP_STYLE = 'mapbox://styles/mapbox/dark-v11';
+  const CALLS_REFRESH_INTERVAL = 5000;
+  const SUMMARY_REFRESH_INTERVAL = 30000;
+  const HOTSPOT_REFRESH_INTERVAL = 45000;
 
   function openFilters() {
     if (!filtersDrawer) return;
@@ -120,7 +105,7 @@ import {
     if (!filtersDrawer) return;
     filtersDrawer.classList.remove('open');
     filtersDrawer.setAttribute('aria-hidden', 'true');
-    if (toggleAdvancedBtn) toggleAdvancedBtn.textContent = 'Advanced filters';
+    if (toggleAdvancedBtn) toggleAdvancedBtn.textContent = 'Filters';
   }
 
   function toggleAdvancedFilters() {
@@ -137,8 +122,7 @@ import {
     state.summaryStats = null;
     windowButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.window === next));
     renderSummaryBar();
-    fetchCalls();
-    fetchSummaryStats();
+    refreshAll();
   }
 
   function windowHours() {
@@ -188,7 +172,7 @@ import {
 
   function windowHintLabel() {
     if (state.window === 'all') {
-      return 'All recorded calls';
+      return 'All recorded incidents';
     }
     const label = windowLabel();
     if (label.startsWith('the last ')) {
@@ -216,6 +200,21 @@ import {
         return '⚠️';
       default:
         return '•';
+    }
+  }
+
+  function formatStatusLabel(status) {
+    switch (status) {
+      case 'done':
+        return 'Completed';
+      case 'processing':
+        return 'Transcribing';
+      case 'queued':
+        return 'Queued';
+      case 'error':
+        return 'Failed';
+      default:
+        return 'Unknown';
     }
   }
 
@@ -368,18 +367,18 @@ import {
           <div class="meta location-line">${escapeHTML(locationLabel)}</div>
         </div>
         <div class="card-flags">
-          <span class="status-icon ${call.status}" aria-label="${call.status}">${statusIcon(call.status)}</span>
-          ${hasMissing ? '<span class="badge warning">Metadata incomplete</span>' : ''}
+          <span class="status-icon ${call.status}" aria-label="${formatStatusLabel(call.status)}">${statusIcon(call.status)}</span>
+          ${hasMissing ? '<span class="badge warning">Missing details</span>' : ''}
         </div>
       </div>
       <div class="call-snippet" title="${snippetSafe}">${snippetSafe}</div>
       <div class="card-footer">
-        <span class="badge ${call.status}">${call.status}</span>
+        <span class="badge ${call.status}">${formatStatusLabel(call.status)}</span>
         <div class="quick-actions">
           ${
             audioUrl
-              ? `<button type="button" class="mini inline-audio incident-audio ${vm.audioClass}">▶ Listen</button>`
-              : '<span class="muted">No audio</span>'
+              ? `<button type="button" class="mini inline-audio incident-audio ${vm.audioClass}">▶ Preview</button>`
+              : '<span class="muted">Audio unavailable</span>'
           }
         </div>
       </div>
@@ -451,7 +450,7 @@ import {
       return;
     }
     callsToRender.forEach((call) => listEl.appendChild(buildCard(call)));
-    totalCount.textContent = `${callsToRender.length} calls`;
+    totalCount.textContent = `${callsToRender.length} incidents`;
   }
 
   function formatTimecode(seconds = 0) {
@@ -631,7 +630,7 @@ import {
     if (detailSummary) {
       detailSummary.textContent = shortSummary(call, 320);
     }
-    detailStatus.innerHTML = `${statusIcon(call.status)} ${call.status}`;
+    detailStatus.innerHTML = `${statusIcon(call.status)} ${formatStatusLabel(call.status)}`;
     detailStatus.className = `badge ${call.status}`;
     detailType.textContent = call.callType || call.call_type || '—';
     detailAgency.textContent = call.agency || call.cityOrTown || call.town || '—';
@@ -643,15 +642,13 @@ import {
       createWave(audioUrl);
       playBtn.disabled = false;
       downloadLink.href = audioUrl;
-      downloadLink.textContent = 'Open audio';
+      downloadLink.textContent = 'Download audio';
     } else {
       destroyWave();
       playBtn.disabled = true;
       downloadLink.removeAttribute('href');
-      downloadLink.textContent = 'Open audio';
+      downloadLink.textContent = 'Audio unavailable';
     }
-    regenBtn.textContent = call.status === 'error' ? 'Retry transcription' : 'Regenerate';
-    regenBtn.disabled = false;
     renderList();
     scheduleStatusPolling(call);
   }
@@ -710,7 +707,7 @@ import {
       overlay.className = 'map-empty';
       mapChart.appendChild(overlay);
     }
-    overlay.innerHTML = `<div><p class="eyebrow">Geography</p><h4>${title}</h4><p class="muted">${message}</p></div>`;
+    overlay.innerHTML = `<div><p class="eyebrow">Incident map</p><h4>${title}</h4><p class="muted">${message}</p></div>`;
   }
 
   function clearMapOverlay() {
@@ -749,6 +746,79 @@ import {
         },
       })),
     };
+  }
+
+  function buildHotspotCollection(spots) {
+    return {
+      type: 'FeatureCollection',
+      features: spots
+        .filter((spot) => Number.isFinite(spot.longitude) && Number.isFinite(spot.latitude))
+        .map((spot, idx) => ({
+          type: 'Feature',
+          id: `hotspot-${idx}`,
+          geometry: { type: 'Point', coordinates: [Number(spot.longitude), Number(spot.latitude)] },
+          properties: {
+            label: spot.label || 'Hotspot',
+            count: Number(spot.count) || 1,
+            intensity: Math.max(1, Math.min(Number(spot.count) || 1, 30)),
+          },
+        })),
+    };
+  }
+
+  function formatHotspotWindowLabel(windowName) {
+    switch (windowName) {
+      case '6h':
+        return 'Last 6 hours';
+      case '12h':
+        return 'Last 12 hours';
+      case '24h':
+        return 'Last 24 hours';
+      case '72h':
+        return 'Last 72 hours';
+      case '7d':
+        return 'Last 7 days';
+      case '30d':
+        return 'Last 30 days';
+      case 'all':
+        return 'All time';
+      default:
+        return 'Rolling 30 days';
+    }
+  }
+
+  function renderHotspotList(windowName) {
+    if (!hotspotListEl) return;
+    hotspotListEl.innerHTML = '';
+    if (hotspotHint) {
+      hotspotHint.textContent = formatHotspotWindowLabel(windowName || state.window);
+    }
+    if (!state.hotspots.length) {
+      const empty = document.createElement('li');
+      empty.className = 'hotspot-empty muted';
+      empty.textContent = 'No hotspots detected for this window.';
+      hotspotListEl.appendChild(empty);
+      return;
+    }
+    state.hotspots.slice(0, 6).forEach((spot) => {
+      const li = document.createElement('li');
+      const titleWrap = document.createElement('div');
+      titleWrap.className = 'label';
+      const title = document.createElement('strong');
+      title.textContent = spot.label || 'Unnamed location';
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      const lastSeen = spot.last_seen || spot.lastSeen;
+      meta.textContent = lastSeen ? `Last seen ${formatDate(lastSeen)}` : 'Cluster activity';
+      titleWrap.appendChild(title);
+      titleWrap.appendChild(meta);
+      const count = document.createElement('span');
+      count.className = 'hotspot-count';
+      count.textContent = `${Number(spot.count || 0).toLocaleString()}×`;
+      li.appendChild(titleWrap);
+      li.appendChild(count);
+      hotspotListEl.appendChild(li);
+    });
   }
 
   function ensureMapSource() {
@@ -807,6 +877,49 @@ import {
         new mapboxgl.Popup({ offset: 12 }).setLngLat(coordinates).setHTML(html).addTo(state.map);
       });
     }
+    if (!state.map.getSource('hotspot-points')) {
+      state.map.addSource('hotspot-points', { type: 'geojson', data: state.hotspotGeoJSON });
+    }
+    if (!state.map.getLayer('hotspot-glow')) {
+      state.map.addLayer({
+        id: 'hotspot-glow',
+        type: 'circle',
+        source: 'hotspot-points',
+        minzoom: 6,
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['get', 'intensity'], 1, 10, 30, 36],
+          'circle-color': '#ffd166',
+          'circle-opacity': 0,
+          'circle-blur': 0.75,
+        },
+      });
+    }
+    if (!state.map.getLayer('hotspot-outline')) {
+      state.map.addLayer({
+        id: 'hotspot-outline',
+        type: 'circle',
+        source: 'hotspot-points',
+        minzoom: 6,
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['get', 'intensity'], 1, 5, 30, 18],
+          'circle-color': 'rgba(11,16,33,0.8)',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ffd166',
+          'circle-opacity': 0,
+        },
+      });
+      state.map.on('click', 'hotspot-outline', (evt) => {
+        const feature = evt.features?.[0];
+        if (!feature) return;
+        const coordinates = feature.geometry.coordinates.slice();
+        const html = `
+          <div>
+            <strong>${escapeHTML(feature.properties.label || 'Hotspot')}</strong>
+            <div class="muted">${Number(feature.properties.count || 0).toLocaleString()} incidents</div>
+          </div>`;
+        new mapboxgl.Popup({ offset: 12 }).setLngLat(coordinates).setHTML(html).addTo(state.map);
+      });
+    }
   }
 
   function refreshMapLayers(boundsData) {
@@ -816,11 +929,22 @@ import {
     if (source) {
       source.setData(state.mapGeoJSON);
     }
+    const hotspotSource = state.map.getSource('hotspot-points');
+    if (hotspotSource) {
+      hotspotSource.setData(state.hotspotGeoJSON);
+    }
     if (state.map.getLayer('call-heatmap')) {
       state.map.setPaintProperty('call-heatmap', 'heatmap-opacity', state.mapLayerVisibility.density ? 0.85 : 0);
     }
     if (state.map.getLayer('call-circles')) {
       state.map.setPaintProperty('call-circles', 'circle-opacity', state.mapLayerVisibility.points ? 0.95 : 0);
+    }
+    const hotspotVisible = state.mapLayerVisibility.hotspots && state.hotspotGeoJSON.features.length > 0;
+    if (state.map.getLayer('hotspot-glow')) {
+      state.map.setPaintProperty('hotspot-glow', 'circle-opacity', hotspotVisible ? 0.65 : 0);
+    }
+    if (state.map.getLayer('hotspot-outline')) {
+      state.map.setPaintProperty('hotspot-outline', 'circle-opacity', hotspotVisible ? 0.9 : 0);
     }
     if (boundsData && boundsData.isValid) {
       state.map.fitBounds(boundsData.bounds, { padding: 48, maxZoom: 13 });
@@ -831,6 +955,7 @@ import {
   function syncMapLayerButtons() {
     if (mapLayerDensity) mapLayerDensity.classList.toggle('active', state.mapLayerVisibility.density);
     if (mapLayerPoints) mapLayerPoints.classList.toggle('active', state.mapLayerVisibility.points);
+    if (mapLayerHotspots) mapLayerHotspots.classList.toggle('active', state.mapLayerVisibility.hotspots);
   }
 
   function setMapLayerVisibility(layer, enabled) {
@@ -866,7 +991,11 @@ import {
     if (!points.length) {
       state.mapGeoJSON = { type: 'FeatureCollection', features: [] };
       resetMapView();
-      setMapOverlay('No mappable locations', `No completed calls with mapped locations in ${windowLabel()}.`);
+      if (state.hotspotGeoJSON.features.length) {
+        clearMapOverlay();
+      } else {
+        setMapOverlay('No mapped incidents', `No completed incidents with map coordinates in ${windowLabel()}.`);
+      }
       refreshMapLayers();
       scheduleMapResize();
       return;
@@ -883,10 +1012,7 @@ import {
     if (typeof window === 'undefined' || !mapChart) return;
     const token = (state.mapboxToken || '').trim();
     if (!token) {
-      showMapUnavailable(
-        'Map unavailable: MAPBOX_TOKEN not configured.',
-        'Configure a valid Mapbox access token to enable geography insights.'
-      );
+      showMapUnavailable('Map unavailable', 'Add a Mapbox access token to view incident geography.');
       return;
     }
     if (typeof mapboxgl === 'undefined') {
@@ -902,7 +1028,7 @@ import {
       mapChart.innerHTML = '';
       state.map = new mapboxgl.Map({
         container: 'map-chart',
-        style: state.theme === 'light' ? 'mapbox://styles/mapbox/light-v11' : 'mapbox://styles/mapbox/dark-v11',
+        style: MAP_STYLE,
         center: MAP_DEFAULT_CENTER,
         zoom: MAP_DEFAULT_ZOOM,
       });
@@ -968,7 +1094,7 @@ import {
     const statusCounts = stats?.by_status || fallbackStats?.status_counts || {};
     const queued = Number(statusCounts.queued || 0) + Number(statusCounts.processing || 0);
     const completed = Number(statusCounts.done || 0);
-    summaryStatus.textContent = stats || fallbackStats ? `${queued} in queue / ${completed} done` : '—';
+    summaryStatus.textContent = stats || fallbackStats ? `${queued} pending • ${completed} completed` : '—';
   }
 
   function renderTagFilterOptions() {
@@ -1023,8 +1149,25 @@ import {
     filterChips.innerHTML = '';
     const chips = [];
     if (state.search) chips.push({ label: `Search: ${state.search}`, onRemove: () => { state.search = ''; searchInput.value = ''; fetchCalls(); } });
-    if (state.status) chips.push({ label: `Status: ${state.status}`, onRemove: () => { state.status = ''; statusSelect.value = ''; fetchCalls(); } });
-    if (state.callType) chips.push({ label: `Call type: ${state.callType}`, onRemove: () => { state.callType = ''; callTypeSelect.value = ''; fetchCalls(); } });
+    if (state.status) {
+      chips.push({
+        label: `Status: ${formatStatusLabel(state.status)}`,
+        onRemove: () => {
+          state.status = '';
+          statusSelect.value = '';
+          fetchCalls();
+        },
+      });
+    }
+    if (state.callType)
+      chips.push({
+        label: `Incident type: ${state.callType}`,
+        onRemove: () => {
+          state.callType = '';
+          callTypeSelect.value = '';
+          fetchCalls();
+        },
+      });
     if (state.agency) chips.push({ label: `Agency: ${state.agency}`, onRemove: () => { state.agency = ''; agencySelect.value = ''; fetchCalls(); } });
     state.tagFilter.forEach((tag) => chips.push({ label: `Tag: ${tag}`, onRemove: () => toggleTag(tag) }));
 
@@ -1043,41 +1186,60 @@ import {
     });
   }
 
-  async function fetchCalls() {
-    state.loading = true;
-    state.error = '';
-    renderList();
+  async function fetchCalls(options = {}) {
+    const { silent = false } = options;
+    if (silent && state.fetchingCalls) {
+      return state.fetchingCalls;
+    }
+    if (!silent) {
+      state.loading = true;
+      state.error = '';
+      renderList();
+    }
     const params = new URLSearchParams();
     params.set('window', state.window);
     if (state.search) params.set('q', state.search);
     if (state.status) params.set('status', state.status);
     if (state.callType) params.set('call_type', state.callType);
     if (state.tagFilter.length) params.set('tags', state.tagFilter.join(','));
-    try {
-      const res = await fetch(`/api/transcriptions?${params.toString()}`);
-      if (!res.ok) {
-        throw new Error('Failed to load calls');
+    const request = (async () => {
+      try {
+        const res = await fetch(`/api/transcriptions?${params.toString()}`);
+        if (!res.ok) {
+          throw new Error('Failed to load calls');
+        }
+        const payload = await res.json();
+        state.mapboxToken = payload.mapbox_token || state.mapboxToken;
+        state.calls = dedupeCalls((payload.calls || []).map(normalizeIncident));
+        state.stats = payload.stats || {};
+        if (state.error) {
+          state.error = '';
+        }
+        renderList();
+        renderTagFilterOptions();
+        renderFilterChips();
+        renderFilterOptions();
+        applyStats();
+        if (state.calls.length && (!state.selected || !state.calls.find((c) => c.filename === state.selected.filename))) {
+          renderDetail(state.calls[0]);
+        }
+      } catch (err) {
+        console.error(err);
+        if (!silent) {
+          state.error = 'Unable to load incidents.';
+          renderList();
+        }
+      } finally {
+        if (!silent) {
+          state.loading = false;
+          renderList();
+        }
       }
-      const payload = await res.json();
-      state.mapboxToken = payload.mapbox_token || state.mapboxToken;
-      state.calls = dedupeCalls((payload.calls || []).map(normalizeIncident));
-      state.stats = payload.stats || {};
-      renderList();
-      renderTagFilterOptions();
-      renderFilterChips();
-      renderFilterOptions();
-      applyStats();
-      if (state.calls.length && (!state.selected || !state.calls.find((c) => c.filename === state.selected.filename))) {
-        renderDetail(state.calls[0]);
-      }
-    } catch (err) {
-      console.error(err);
-      state.error = 'Unable to load incidents.';
-      renderList();
-    } finally {
-      state.loading = false;
-      renderList();
-    }
+    })();
+    state.fetchingCalls = request;
+    return request.finally(() => {
+      state.fetchingCalls = null;
+    });
   }
 
   async function fetchSummaryStats() {
@@ -1092,6 +1254,26 @@ import {
       renderSummaryBar();
     } catch (err) {
       console.error(err);
+    }
+  }
+
+  async function fetchHotspots() {
+    try {
+      const res = await fetch(`/api/hotspots?window=${encodeURIComponent(state.window)}`);
+      if (!res.ok) {
+        throw new Error('failed to load hotspots');
+      }
+      const payload = await res.json();
+      state.hotspots = Array.isArray(payload.hotspots) ? payload.hotspots : [];
+      state.hotspotGeoJSON = buildHotspotCollection(state.hotspots);
+      renderHotspotList(payload.window || state.window);
+      refreshMapLayers();
+    } catch (err) {
+      console.error(err);
+      state.hotspots = [];
+      state.hotspotGeoJSON = { type: 'FeatureCollection', features: [] };
+      renderHotspotList(state.window);
+      refreshMapLayers();
     }
   }
 
@@ -1122,17 +1304,53 @@ import {
     state.pollTimer = setInterval(() => refreshSelected(call.filename), 5000);
   }
 
-  async function regenerate() {
-    if (!state.selected) return;
-    regenBtn.disabled = true;
-    try {
-      await fetch(`/api/transcription?filename=${encodeURIComponent(state.selected.filename)}`, { method: 'POST' });
-    } finally {
-      regenBtn.disabled = false;
-      fetchCalls();
-      refreshSelected(state.selected.filename);
+  function refreshAll(options = {}) {
+    const { silentCalls = false } = options;
+    fetchCalls({ silent: silentCalls });
+    fetchSummaryStats();
+    fetchHotspots();
+  }
+
+  function stopAutoRefreshLoops() {
+    if (state.autoRefreshTimer) {
+      clearInterval(state.autoRefreshTimer);
+      state.autoRefreshTimer = null;
+    }
+    if (state.summaryRefreshTimer) {
+      clearInterval(state.summaryRefreshTimer);
+      state.summaryRefreshTimer = null;
+    }
+    if (state.hotspotRefreshTimer) {
+      clearInterval(state.hotspotRefreshTimer);
+      state.hotspotRefreshTimer = null;
     }
   }
+
+  function startAutoRefreshLoops() {
+    stopAutoRefreshLoops();
+    state.autoRefreshTimer = setInterval(() => {
+      if (!document.hidden) {
+        fetchCalls({ silent: true });
+      }
+    }, CALLS_REFRESH_INTERVAL);
+    state.summaryRefreshTimer = setInterval(() => {
+      if (!document.hidden) {
+        fetchSummaryStats();
+      }
+    }, SUMMARY_REFRESH_INTERVAL);
+    state.hotspotRefreshTimer = setInterval(() => {
+      if (!document.hidden) {
+        fetchHotspots();
+      }
+    }, HOTSPOT_REFRESH_INTERVAL);
+  }
+
+  function handleVisibilityChange() {
+    if (!document.hidden) {
+      refreshAll({ silentCalls: true });
+    }
+  }
+
 
   searchInput.addEventListener('input', (e) => {
     state.search = e.target.value;
@@ -1162,10 +1380,8 @@ import {
     });
   }
   refreshBtn.addEventListener('click', () => {
-    fetchCalls();
-    fetchSummaryStats();
+    refreshAll();
   });
-  regenBtn.addEventListener('click', regenerate);
   playBtn.addEventListener('click', () => {
     if (state.wavesurfer) state.wavesurfer.playPause();
   });
@@ -1183,10 +1399,6 @@ import {
   });
   windowButtons.forEach((btn) => btn.addEventListener('click', () => setWindow(btn.dataset.window)));
 
-  if (themeToggle) {
-    themeToggle.addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
-  }
-
   if (toggleAdvancedBtn) {
     toggleAdvancedBtn.addEventListener('click', toggleAdvancedFilters);
   }
@@ -1202,6 +1414,9 @@ import {
   document.addEventListener('keydown', (evt) => {
     if (evt.key === 'Escape') closeFilters();
   });
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  window.addEventListener('focus', () => refreshAll({ silentCalls: true }));
+  window.addEventListener('beforeunload', stopAutoRefreshLoops);
 
   if (mapLayerDensity) {
     mapLayerDensity.addEventListener('click', () => setMapLayerVisibility('density', !state.mapLayerVisibility.density));
@@ -1211,12 +1426,16 @@ import {
     mapLayerPoints.addEventListener('click', () => setMapLayerVisibility('points', !state.mapLayerVisibility.points));
   }
 
+  if (mapLayerHotspots) {
+    mapLayerHotspots.addEventListener('click', () => setMapLayerVisibility('hotspots', !state.mapLayerVisibility.hotspots));
+  }
+
   window.addEventListener('resize', scheduleMapResize);
 
   closeFilters();
   bindSuggestions();
-  initializeTheme();
   syncMapLayerButtons();
-  fetchSummaryStats();
-  fetchCalls();
+  renderHotspotList(state.window);
+  refreshAll();
+  startAutoRefreshLoops();
 })();
