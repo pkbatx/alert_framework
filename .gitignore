@@ -15,3 +15,9 @@ alert_server
 alert_server.exe
 *.db
 *.db-*
+.gopath/
+.gocache/
+alert_server
+alert_server.exe
+*.db
+*.db-*
