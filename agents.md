@@ -81,6 +81,32 @@ Guarantees
 
 ⸻
 
+Agent: MetadataRefiner
+
+Responsibilities
+	•	Run GPT-5.1 cleanup + extraction prompts against each transcript.
+	•	Return the normalized transcript summary, structured metadata JSON, and patient/incident notes.
+	•	Hand the resulting object to the AddressVerifier for Mapbox reconciliation and manual-review routing.
+
+Guarantees
+	•	Uses the runtime-reloadable prompts defined in `config/config.yaml`.
+	•	Outputs deterministic JSON (no free-form chat text).
+
+⸻
+
+Agent: AddressVerifier
+
+Responsibilities
+	•	Run deterministic regex/heuristic parsing on the normalized transcript to extract address candidates within Sussex County.
+	•	When heuristics fail, invoke the configurable metadata prompt (LLM) one time per call to propose an address + municipality, then geocode the result with Mapbox inside the Sussex bounding box.
+	•	Cache verified coordinates against each filename so historical views never trigger additional API calls.
+
+Guarantees
+	•	Never accept coordinates outside Sussex County (unless transcripts explicitly cite Warren County, which is still rare).
+	•	Minimize cost by only invoking the metadata prompt after both deterministic parsing and Mapbox searches fail.
+
+⸻
+
 Agent: Formatter
 
 Responsibilities

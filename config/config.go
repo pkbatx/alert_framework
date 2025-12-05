@@ -25,6 +25,8 @@ type Config struct {
 	PublicBaseURL      string
 	AudioFilterEnabled bool
 	FFMPEGBin          string
+	NLP                NLPConfig
+	NLPConfigPath      string
 }
 
 const (
@@ -56,6 +58,7 @@ func Load() (Config, error) {
 		PublicBaseURL:      strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 		AudioFilterEnabled: parseBoolEnvDefault("AUDIO_FILTER_ENABLED", true),
 		FFMPEGBin:          getEnv("FFMPEG_BIN", "ffmpeg"),
+		NLPConfigPath:      getEnv("NLP_CONFIG_PATH", filepath.Join("config", "config.yaml")),
 	}
 	if os.Getenv("DB_PATH") == "" {
 		cfg.DBPath = filepath.Join(cfg.WorkDir, filepath.Base(defaultDBPath))
@@ -113,6 +116,13 @@ func Load() (Config, error) {
 		}
 		cfg.JobTimeoutSec = n
 	}
+
+	nlpCfg, err := LoadNLPConfig(cfg.NLPConfigPath)
+	if err != nil {
+		log.Printf("nlp config load failed (%s): %v (using defaults)", cfg.NLPConfigPath, err)
+		nlpCfg = DefaultNLPConfig()
+	}
+	cfg.NLP = nlpCfg
 
 	return cfg, nil
 }

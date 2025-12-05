@@ -8,6 +8,7 @@ A Go-based automation service that watches a directory of new radio call recordi
 - Sends two-stage GroupMe notifications (initial alert + cleaned transcript) using the shared formatting engine.
 - Persists all call context, transcripts, tags, locations, and regen history inside a local SQLite database.
 - Embedded frontend (vanilla JS + Plotly + Mapbox) provides filtering, waveform playback, hotspot maps, and transcript utilities.
+- Sussex-focused metadata inference verifies street-level addresses with Mapbox after (optional) LLM-backed cleanup, keeping Lakeland EMS calls pinned to Andover Township unless transcripts clearly say otherwise.
 - Ships with Docker support, optional audio preprocessing via `ffmpeg`, and zero external dependencies beyond OpenAI + GroupMe.
 
 See `agents.md` for the authoritative description of each agent (watcher, queue manager, workers, UI, etc.).
@@ -77,8 +78,28 @@ All settings are sourced from environment variables (or `.env`). Common options:
 | `JOB_QUEUE_SIZE` | Bounded queue capacity (auto clamped between 1 and 1024) | `100` |
 | `JOB_TIMEOUT_SEC` | Max seconds a worker may hold a job | `60` |
 | `DEV_UI` | Enables extra UI traces/tooling when truthy | `false` |
+| `NLP_CONFIG_PATH` | Path to the GPT-5.1 prompt template file | `config/config.yaml` |
 
 Use `.env.example` as a starting point; it documents every variable that ships with the service.
+
+### Prompt customization
+
+`POST /api/settings` accepts the same payload returned from `GET /api/settings`. Update `cleanup_prompt` to tweak transcript normalization rules, and `metadata_prompt` to fine tune the Sussex-specific metadata extractor. Leaving either field empty automatically falls back to the hardened defaults defined in `main.go`.
+
+The metadata prompt powers a two-stage location flow:
+
+1. Deterministic parsing + regex extraction attempts to geocode an address strictly inside the Sussex bounding box.
+2. If that fails, the metadata prompt runs once against the normalized transcript (after the OpenAI transcription step completes). The JSON response is geocoded with Mapbox and only accepted when the coordinates fall within Sussex County (Andover Township bias). The result is cached per filename so subsequent UI loads avoid extra API calls.
+
+#### config/config.yaml
+
+`config/config.yaml` (JSON syntax, still valid YAML 1.2) hosts runtime-reloadable templates for the GPT-5.1 refinement pipeline. Edit this file to adjust:
+
+- `cleanup_prompt`, `metadata_prompt`, and `address_prompt`
+- `refinement_temperature`, summary/cleanup style, and Sussex bias mode
+- Mapbox bounding box overrides
+
+The backend watches this file and reloads templates at runtime—no restart required. Use `NLP_CONFIG_PATH` to point at alternate locations per environment.
 
 ## Development Workflow
 

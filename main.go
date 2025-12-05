@@ -32,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"alert_framework/backend/refine"
 	"alert_framework/config"
 	"alert_framework/formatting"
 	"alert_framework/metrics"
@@ -66,17 +67,19 @@ var (
 	allowedExtensions = map[string]struct{}{
 		".mp3": {}, ".mp4": {}, ".mpeg": {}, ".mpga": {}, ".m4a": {}, ".wav": {}, ".webm": {},
 	}
-	ffmpegBinary         = "ffmpeg"
-	audioFilterEnabled   = true
-	sussexMinLat         = 40.9
-	sussexMaxLat         = 41.4
-	sussexMinLng         = -75.2
-	sussexMaxLng         = -74.3
-	sussexTowns          = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
-	warrenTowns          = []string{"Allamuchy", "Alpha", "Belvidere", "Blairstown", "Franklin", "Frelinghuysen", "Greenwich", "Hackettstown", "Hardwick", "Harmony", "Hope", "Independence", "Knowlton", "Liberty", "Lopatcong", "Mansfield", "Oxford", "Phillipsburg", "Pohatcong", "Washington Boro", "Washington Township", "White"}
-	defaultCleanupPrompt = buildCleanupPrompt()
-	countyByTown         = buildCountyLookup()
-	addressPattern       = regexp.MustCompile(`(?i)(\b\d{3,6}\s+[A-Za-z0-9'\.\s]+\s+(Street|St|Road|Rd|Avenue|Ave|Highway|Hwy|Route|Rt|Lane|Ln|Drive|Dr|Court|Ct|Place|Pl|Way|Pike|Circle|Cir))`)
+	ffmpegBinary                 = "ffmpeg"
+	audioFilterEnabled           = true
+	sussexMinLat                 = 40.9
+	sussexMaxLat                 = 41.4
+	sussexMinLng                 = -75.2
+	sussexMaxLng                 = -74.3
+	sussexTowns                  = []string{"Andover", "Byram", "Frankford", "Franklin", "Green", "Hamburg", "Hardyston", "Hopatcong", "Lafayette", "Montague", "Newton", "Ogdensburg", "Sandyston", "Sparta", "Stanhope", "Stillwater", "Sussex", "Vernon", "Wantage", "Fredon", "Branchville"}
+	warrenTowns                  = []string{"Allamuchy", "Alpha", "Belvidere", "Blairstown", "Franklin", "Frelinghuysen", "Greenwich", "Hackettstown", "Hardwick", "Harmony", "Hope", "Independence", "Knowlton", "Liberty", "Lopatcong", "Mansfield", "Oxford", "Phillipsburg", "Pohatcong", "Washington Boro", "Washington Township", "White"}
+	defaultCleanupPrompt         = buildCleanupPrompt()
+	defaultMetadataPrompt        = buildMetadataPrompt()
+	countyByTown                 = buildCountyLookup()
+	addressPattern               = regexp.MustCompile(`(?i)(\b\d{3,6}\s+[A-Za-z0-9'\.\s]+\s+(Street|St|Road|Rd|Avenue|Ave|Highway|Hwy|Route|Rt|Lane|Ln|Drive|Dr|Court|Ct|Place|Pl|Way|Pike|Circle|Cir))`)
+	errMetadataInferenceDisabled = errors.New("metadata inference disabled")
 )
 
 func buildCleanupPrompt() string {
@@ -88,6 +91,20 @@ func buildCleanupPrompt() string {
 		townList,
 		warrenList,
 		"Return JSON with fields normalized_transcript and recognized_towns (array). Maintain the original meaning and avoid adding new details.",
+	}, " ")
+}
+
+func buildMetadataPrompt() string {
+	sussexFocus := "Prefer addresses within Sussex County, New Jersey (especially Andover Township and surrounding boroughs)."
+	output := "Return JSON with address_line, municipality, county, cross_street, confidence (0-1 float), and notes explaining the decision."
+	return strings.Join([]string{
+		"You are an incident metadata specialist for Lakeland EMS.",
+		"Given noisy dispatch transcripts and file metadata, identify the most probable street-level address referenced in the call.",
+		sussexFocus,
+		"Only consider Warren County if the transcript clearly references it; otherwise bias toward Sussex municipalities listed in the metadata.",
+		"Favor precise house numbers when available; otherwise combine the best street and municipality combination.",
+		output,
+		"If you cannot locate an address, set address_line to an empty string, confidence to 0, and describe why in notes.",
 	}, " ")
 }
 
@@ -159,6 +176,9 @@ type transcription struct {
 	Longitude            *float64   `json:"longitude"`
 	LocationLabel        *string    `json:"location_label"`
 	LocationSource       *string    `json:"location_source"`
+	RefinedMetadata      *string    `json:"refined_metadata"`
+	AddressJSON          *string    `json:"address_json"`
+	NeedsManualReview    bool       `json:"needs_manual_review"`
 	CreatedAt            time.Time  `json:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at"`
 	Similar              []similar  `json:"similar,omitempty"`
@@ -224,6 +244,9 @@ type transcriptionResponse struct {
 	Tags                 []string            `json:"tags,omitempty"`
 	Segments             []transcriptSegment `json:"segments,omitempty"`
 	Location             *locationGuess      `json:"location,omitempty"`
+	RefinedMetadata      *string             `json:"refined_metadata,omitempty"`
+	AddressJSON          *string             `json:"address_json,omitempty"`
+	NeedsManualReview    bool                `json:"needs_manual_review"`
 }
 
 type locationGuess struct {
@@ -232,6 +255,15 @@ type locationGuess struct {
 	Longitude float64 `json:"longitude,omitempty"`
 	Precision string  `json:"precision,omitempty"`
 	Source    string  `json:"source,omitempty"`
+}
+
+type metadataInference struct {
+	AddressLine  string  `json:"address_line"`
+	Municipality string  `json:"municipality"`
+	County       string  `json:"county"`
+	CrossStreet  string  `json:"cross_street"`
+	Confidence   float64 `json:"confidence"`
+	Notes        string  `json:"notes"`
 }
 
 type tagCount struct {
@@ -317,6 +349,7 @@ type AppSettings struct {
 	WebhookEndpoints  []string
 	PreferredLanguage string
 	CleanupPrompt     string
+	MetadataPrompt    string
 }
 
 type server struct {
@@ -331,6 +364,7 @@ type server struct {
 	tz            *time.Location
 	ctx           context.Context
 	locationCache sync.Map
+	refiner       *refine.Service
 }
 
 // QueueDebugResponse represents the payload returned from /debug/queue.
@@ -426,6 +460,13 @@ func main() {
 		tz:       tz,
 		ctx:      ctx,
 	}
+
+	refiner, err := refine.NewService(s.client, cfg)
+	if err != nil {
+		log.Fatalf("refine init failed: %v", err)
+	}
+	s.refiner = refiner
+	defer refiner.Close()
 
 	s.queue = queue.New(cfg.JobQueueSize, cfg.WorkerCount, time.Duration(cfg.JobTimeoutSec)*time.Second, m)
 	s.queue.Start(ctx)
@@ -660,6 +701,9 @@ func migrateBaseline(db *sql.DB) error {
     recognized_towns TEXT NULL,
     normalized_transcript TEXT NULL,
     call_type TEXT NULL,
+    refined_metadata TEXT NULL,
+    address_json TEXT NULL,
+    needs_manual_review INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -693,6 +737,9 @@ END;`
 		"location_label":           "TEXT",
 		"location_source":          "TEXT",
 		"processed_path":           "TEXT",
+		"refined_metadata":         "TEXT",
+		"address_json":             "TEXT",
+		"needs_manual_review":      "INTEGER DEFAULT 0",
 	}
 	for col, colType := range needed {
 		if err := addColumnIfMissing(db, "transcriptions", col, colType); err != nil {
@@ -708,17 +755,24 @@ default_model TEXT,
     webhook_endpoints TEXT,
     preferred_language TEXT,
     cleanup_prompt TEXT,
+    metadata_prompt TEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );`); err != nil {
 		return err
 	}
-	if _, err := execWithRetry(db, `INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, cleanup_prompt) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]', '');`); err != nil {
+	if _, err := execWithRetry(db, `INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, cleanup_prompt, metadata_prompt) VALUES(1, 'gpt-4o-transcribe', 'transcribe', 'json', 0, '[]', '', '');`); err != nil {
 		return err
 	}
 	if err := addColumnIfMissing(db, "app_settings", "cleanup_prompt", "TEXT"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(db, "app_settings", "metadata_prompt", "TEXT"); err != nil {
+		return err
+	}
 	if _, err := execWithRetry(db, `UPDATE app_settings SET cleanup_prompt = ? WHERE id = 1 AND (cleanup_prompt IS NULL OR cleanup_prompt = '')`, defaultCleanupPrompt); err != nil {
+		return err
+	}
+	if _, err := execWithRetry(db, `UPDATE app_settings SET metadata_prompt = ? WHERE id = 1 AND (metadata_prompt IS NULL OR metadata_prompt = '')`, defaultMetadataPrompt); err != nil {
 		return err
 	}
 	return nil
@@ -1195,7 +1249,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			log.Printf("failed to mirror duplicate data: %v", err)
 		}
 		note := fmt.Sprintf("duplicate of %s", dup)
-		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
 		if j.sendGroupMe {
 			followup := fmt.Sprintf("%s transcript is duplicate of %s", filename, dup)
 			_ = s.sendGroupMe(followup)
@@ -1213,7 +1267,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	decodeDur = time.Since(decodeStart)
 
 	transcribeStart := time.Now()
-	rawTranscript, cleanedTranscript, translation, embedding, diarized, towns, normalized, actualModel, callType, err := s.multiPassTranscription(stagedPath, j.options)
+	artifacts, err := s.multiPassTranscription(stagedPath, j.options, j.meta)
 	if err != nil {
 		s.markError(filename, err)
 		status = err.Error()
@@ -1221,6 +1275,15 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 		return err
 	}
 	transcribeDur = time.Since(transcribeStart)
+	rawTranscript := artifacts.RawTranscript
+	cleanedTranscript := artifacts.CleanTranscript
+	translation := artifacts.Translation
+	embedding := artifacts.Embedding
+	diarized := artifacts.DiarizedJSON
+	towns := artifacts.RecognizedTowns
+	normalized := artifacts.NormalizedText
+	actualModel := artifacts.ActualModel
+	callType := artifacts.CallType
 	if callType == nil && existingEntry != nil && existingEntry.CallType != nil {
 		callType = existingEntry.CallType
 	}
@@ -1285,11 +1348,24 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 	if resolvedLocation == nil {
 		applyLocationGuess(s.deriveLocation(candidateRecord, j.meta))
 	}
+	if resolvedLocation == nil && normalized != nil {
+		metaCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		inference, err := s.inferMetadataAddress(metaCtx, *normalized, j.meta, recognized)
+		cancel()
+		if err != nil && !errors.Is(err, errMetadataInferenceDisabled) {
+			log.Printf("metadata inference failed for %s: %v", filename, err)
+		}
+		if err == nil && inference != nil {
+			geoCtx, geoCancel := context.WithTimeout(context.Background(), 4*time.Second)
+			applyLocationGuess(s.metadataLocationGuess(geoCtx, inference, j.meta))
+			geoCancel()
+		}
+	}
 	if resolvedLocation == nil {
 		applyLocationGuess(s.historicalHotspot(j.meta, recognized))
 	}
 
-	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType, tagsJSON, latPtr, lonPtr, locationLabel, locationSource); err != nil {
+	if err := s.markDoneWithDetails(filename, "", &rawTranscript, &cleanedTranscript, translation, nil, diarized, towns, normalized, actualModel, callType, tagsJSON, latPtr, lonPtr, locationLabel, locationSource, artifacts.MetadataJSON, artifacts.AddressJSON, artifacts.NeedsManualReview); err != nil {
 		status = err.Error()
 		return err
 	}
@@ -1365,29 +1441,69 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-func (s *server) multiPassTranscription(path string, opts TranscriptionOptions) (string, string, *string, []float64, *string, *string, *string, *string, *string, error) {
+type transcriptionArtifacts struct {
+	RawTranscript     string
+	CleanTranscript   string
+	Translation       *string
+	Embedding         []float64
+	DiarizedJSON      *string
+	RecognizedTowns   *string
+	NormalizedText    *string
+	ActualModel       *string
+	CallType          *string
+	MetadataJSON      *string
+	AddressJSON       *string
+	NeedsManualReview bool
+}
+
+func (s *server) multiPassTranscription(path string, opts TranscriptionOptions, meta formatting.CallMetadata) (transcriptionArtifacts, error) {
+	result := transcriptionArtifacts{}
 	raw, diarized, actualModel, err := s.callOpenAIWithRetries(path, opts)
 	if err != nil {
-		return "", "", nil, nil, nil, nil, nil, nil, nil, err
+		return result, err
 	}
+	result.RawTranscript = raw
+	result.DiarizedJSON = diarized
+	result.ActualModel = actualModel
 	cleaned := raw
-	normalized := (*string)(nil)
-	towns := (*string)(nil)
-	if c, n, t, err := s.domainCleanup(raw); err == nil {
-		if c != "" {
-			cleaned = c
+
+	var normalized *string
+	var towns *string
+	var metadataJSON *string
+	var addressJSON *string
+	var callType *string
+	var manualReview bool
+
+	if s.refiner != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		refined, refineErr := s.refiner.Refine(ctx, refine.Request{
+			Transcript:      raw,
+			Metadata:        meta,
+			RecognizedTowns: []string{meta.TownDisplay},
+		})
+		cancel()
+		if refineErr != nil {
+			log.Printf("refine pipeline failed: %v", refineErr)
+		} else {
+			if strings.TrimSpace(refined.CleanTranscript) != "" {
+				cleaned = refined.CleanTranscript
+			}
+			if len(refined.RecognizedTowns) > 0 {
+				data, _ := json.Marshal(refined.RecognizedTowns)
+				townsStr := string(data)
+				towns = &townsStr
+			}
+			callType = optionalString(strings.TrimSpace(refined.Metadata.IncidentType))
+			if data, err := json.Marshal(refined.Metadata); err == nil {
+				metaStr := string(data)
+				metadataJSON = &metaStr
+			}
+			if data, err := json.Marshal(refined.Address); err == nil {
+				addrStr := string(data)
+				addressJSON = &addrStr
+			}
+			manualReview = refined.NeedsManualReview
 		}
-		if n != "" {
-			normalized = &n
-		}
-		if len(t) > 0 {
-			data, _ := json.Marshal(t)
-			townsStr := string(data)
-			towns = &townsStr
-		}
-	}
-	if c, err := s.enhanceTranscript(cleaned); err == nil && c != "" {
-		cleaned = c
 	}
 
 	normalizationSource := cleaned
@@ -1396,6 +1512,26 @@ func (s *server) multiPassTranscription(path string, opts TranscriptionOptions) 
 	}
 	if normalizedText := formatting.NormalizeTranscript(normalizationSource); normalizedText != "" {
 		normalized = &normalizedText
+	}
+	if normalized == nil {
+		norm := formatting.NormalizeTranscript(cleaned)
+		normalized = &norm
+	}
+
+	if towns == nil {
+		if c, n, t, err := s.domainCleanup(raw); err == nil {
+			if c != "" && strings.TrimSpace(cleaned) == "" {
+				cleaned = c
+			}
+			if n != "" {
+				normalized = &n
+			}
+			if len(t) > 0 {
+				data, _ := json.Marshal(t)
+				townsStr := string(data)
+				towns = &townsStr
+			}
+		}
 	}
 
 	var translation *string
@@ -1406,8 +1542,20 @@ func (s *server) multiPassTranscription(path string, opts TranscriptionOptions) 
 	}
 
 	emb, _ := s.embedTranscript(cleaned)
-	ct, _ := s.classifyCallType(cleaned)
-	return raw, cleaned, translation, emb, diarized, towns, normalized, actualModel, ct, nil
+	if callType == nil {
+		callType, _ = s.classifyCallType(cleaned)
+	}
+
+	result.CleanTranscript = cleaned
+	result.Translation = translation
+	result.Embedding = emb
+	result.RecognizedTowns = towns
+	result.NormalizedText = normalized
+	result.CallType = callType
+	result.MetadataJSON = metadataJSON
+	result.AddressJSON = addressJSON
+	result.NeedsManualReview = manualReview
+	return result, nil
 }
 
 func (s *server) callOpenAIWithRetries(path string, opts TranscriptionOptions) (string, *string, *string, error) {
@@ -2335,7 +2483,7 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 	windowName, windowDuration := normalizeWindowName(rawWindow, "6h")
 
 	baseURL := s.resolveBaseURL(r)
-	query := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
+query := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
 	args := []interface{}{}
 	var cutoff time.Time
 	if windowDuration > 0 {
@@ -2387,7 +2535,7 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 	var calls []transcriptionResponse
 	for rows.Next() {
 		var t transcription
-		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.ProcessedPath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := scanTranscription(rows, &t); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
@@ -2535,7 +2683,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	windowName, windowDuration := normalizeWindowName(rawWindow, "24h")
 
-	base := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions`
+base := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
 	where := []string{}
 	args := []interface{}{}
 	var cutoff time.Time
@@ -2573,7 +2721,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	var calls []transcriptionResponse
 	for rows.Next() {
 		var t transcription
-		if err := rows.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.ProcessedPath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := scanTranscription(rows, &t); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
@@ -3182,6 +3330,9 @@ func (s *server) toResponse(t transcription, baseURL string) transcriptionRespon
 		Tags:                 tags,
 		Segments:             s.buildSegments(t),
 		Location:             location,
+		RefinedMetadata:      t.RefinedMetadata,
+		AddressJSON:          t.AddressJSON,
+		NeedsManualReview:    t.NeedsManualReview,
 	}
 }
 
@@ -3525,15 +3676,182 @@ func (s *server) geocodeWithMapbox(ctx context.Context, token, query string) *lo
 	return nil
 }
 
+func (s *server) inferMetadataAddress(ctx context.Context, transcript string, meta formatting.CallMetadata, recognized []string) (*metadataInference, error) {
+	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if apiKey == "" {
+		return nil, errMetadataInferenceDisabled
+	}
+	transcript = strings.TrimSpace(transcript)
+	settings, err := s.loadSettings()
+	if err != nil {
+		return nil, err
+	}
+	prompt := strings.TrimSpace(settings.MetadataPrompt)
+	if prompt == "" {
+		return nil, errMetadataInferenceDisabled
+	}
+	payload := map[string]interface{}{
+		"model":           "gpt-4.1-mini",
+		"response_format": map[string]string{"type": "json_object"},
+		"messages": []map[string]string{
+			{"role": "system", "content": prompt},
+			{"role": "user", "content": metadataUserContent(transcript, meta, recognized)},
+		},
+	}
+	buf, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("metadata prompt status %d: %s", resp.StatusCode, string(b))
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, err
+	}
+	if len(parsed.Choices) == 0 {
+		return nil, errors.New("metadata prompt returned no choices")
+	}
+	content := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	if content == "" {
+		return nil, errors.New("metadata prompt returned empty content")
+	}
+	var inference metadataInference
+	if err := json.Unmarshal([]byte(content), &inference); err != nil {
+		return nil, err
+	}
+	inference.AddressLine = strings.TrimSpace(inference.AddressLine)
+	inference.Municipality = strings.TrimSpace(inference.Municipality)
+	inference.County = strings.TrimSpace(inference.County)
+	inference.CrossStreet = strings.TrimSpace(inference.CrossStreet)
+	if inference.Confidence < 0 {
+		inference.Confidence = 0
+	}
+	if inference.Confidence > 1 {
+		inference.Confidence = 1
+	}
+	return &inference, nil
+}
+
+func metadataUserContent(transcript string, meta formatting.CallMetadata, recognized []string) string {
+	ts := meta.DateTime
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	payload := map[string]interface{}{
+		"transcript":        transcript,
+		"filename":          meta.RawFileName,
+		"agency":            meta.AgencyDisplay,
+		"call_type":         meta.CallType,
+		"call_timestamp":    ts.Format(time.RFC3339),
+		"recognized_towns":  recognized,
+		"fallback_town":     meta.TownDisplay,
+		"raw_file_metadata": meta,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return transcript
+	}
+	return string(data)
+}
+
+func (s *server) metadataLocationGuess(ctx context.Context, inference *metadataInference, meta formatting.CallMetadata) *locationGuess {
+	if inference == nil {
+		return nil
+	}
+	address := strings.TrimSpace(inference.AddressLine)
+	town := strings.TrimSpace(inference.Municipality)
+	if town == "" {
+		town = strings.TrimSpace(meta.TownDisplay)
+	}
+	if address == "" && town == "" {
+		return nil
+	}
+	labelParts := []string{}
+	if address != "" {
+		labelParts = append(labelParts, address)
+	}
+	if town != "" {
+		labelParts = append(labelParts, town)
+	}
+	label := strings.Join(labelParts, ", ")
+	precision := "metadata_ai"
+	if inference.Confidence > 0 {
+		precision = fmt.Sprintf("metadata_ai_%02d", int(math.Round(inference.Confidence*100)))
+	}
+	guess := &locationGuess{
+		Label:     label,
+		Precision: precision,
+		Source:    "metadata_prompt",
+	}
+	token := strings.TrimSpace(s.cfg.MapboxToken)
+	if token == "" {
+		return guess
+	}
+	var candidates []string
+	if address != "" && town != "" {
+		candidates = append(candidates, fmt.Sprintf("%s, %s, Sussex County, NJ", address, town))
+	}
+	if address != "" {
+		candidates = append(candidates, fmt.Sprintf("%s, Sussex County, NJ", address))
+	}
+	if inference.CrossStreet != "" && town != "" {
+		candidates = append(candidates, fmt.Sprintf("%s and %s, %s, Sussex County, NJ", address, inference.CrossStreet, town))
+	}
+	if town != "" {
+		candidates = append(candidates, fmt.Sprintf("%s, Sussex County, NJ", town))
+	}
+	if inference.County != "" && !strings.Contains(strings.ToLower(inference.County), "sussex") {
+		candidates = append(candidates, fmt.Sprintf("%s, %s, NJ", address, inference.County))
+	}
+	if len(candidates) == 0 && label != "" {
+		candidates = append(candidates, label+" Sussex County NJ")
+	}
+
+	for _, candidate := range candidates {
+		loc := s.geocodeWithMapbox(ctx, token, candidate)
+		if loc == nil {
+			continue
+		}
+		if loc.Label == "" {
+			loc.Label = label
+		}
+		if inference.Confidence > 0 {
+			loc.Precision = precision
+		} else if loc.Precision == "" {
+			loc.Precision = guess.Precision
+		}
+		loc.Source = "metadata_prompt"
+		return loc
+	}
+
+	return guess
+}
+
 func (s *server) loadSettings() (AppSettings, error) {
 	var settings AppSettings
 	var auto sql.NullInt64
 	var webhooks sql.NullString
 	var defaultModel, defaultMode, defaultFormat sql.NullString
-	var preferredLanguage, cleanupPrompt sql.NullString
+	var preferredLanguage, cleanupPrompt, metadataPrompt sql.NullString
 	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
-		return row.Scan(&defaultModel, &defaultMode, &defaultFormat, &auto, &webhooks, &preferredLanguage, &cleanupPrompt)
-	}, `SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt FROM app_settings WHERE id=1`); err != nil {
+		return row.Scan(&defaultModel, &defaultMode, &defaultFormat, &auto, &webhooks, &preferredLanguage, &cleanupPrompt, &metadataPrompt)
+	}, `SELECT default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt, metadata_prompt FROM app_settings WHERE id=1`); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			if err := s.ensureSettingsRow(); err != nil {
 				return settings, err
@@ -3547,6 +3865,7 @@ func (s *server) loadSettings() (AppSettings, error) {
 	settings.DefaultFormat = fallbackEmpty(stringFromNull(defaultFormat, defaultTranscriptionFormat), defaultTranscriptionFormat)
 	settings.PreferredLanguage = stringFromNull(preferredLanguage, "")
 	settings.CleanupPrompt = strings.TrimSpace(stringFromNull(cleanupPrompt, ""))
+	settings.MetadataPrompt = strings.TrimSpace(stringFromNull(metadataPrompt, ""))
 	settings.AutoTranslate = auto.Valid && auto.Int64 == 1
 	hooksJSON := stringFromNull(webhooks, "[]")
 	if strings.TrimSpace(hooksJSON) == "" {
@@ -3558,6 +3877,9 @@ func (s *server) loadSettings() (AppSettings, error) {
 	}
 	if strings.TrimSpace(settings.CleanupPrompt) == "" {
 		settings.CleanupPrompt = defaultCleanupPrompt
+	}
+	if strings.TrimSpace(settings.MetadataPrompt) == "" {
+		settings.MetadataPrompt = defaultMetadataPrompt
 	}
 	settings.DefaultModel = normalizeModelName(fallbackEmpty(settings.DefaultModel, defaultTranscriptionModel))
 	settings.DefaultMode = fallbackEmpty(settings.DefaultMode, defaultTranscriptionMode)
@@ -3604,35 +3926,41 @@ func (s *server) saveSettings(settings AppSettings) error {
 	if strings.TrimSpace(settings.CleanupPrompt) == "" {
 		settings.CleanupPrompt = defaultCleanupPrompt
 	}
+	if strings.TrimSpace(settings.MetadataPrompt) == "" {
+		settings.MetadataPrompt = defaultMetadataPrompt
+	}
 	hooks, _ := json.Marshal(settings.WebhookEndpoints)
 	auto := 0
 	if settings.AutoTranslate {
 		auto = 1
 	}
-	res, err := execWithRetry(s.db, `UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, cleanup_prompt=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt)
+	res, err := execWithRetry(s.db, `UPDATE app_settings SET default_model=?, default_mode=?, default_format=?, auto_translate=?, webhook_endpoints=?, preferred_language=?, cleanup_prompt=?, metadata_prompt=?, updated_at=CURRENT_TIMESTAMP WHERE id=1`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt, settings.MetadataPrompt)
 	if err != nil {
 		return err
 	}
 	rows, err := res.RowsAffected()
 	if err == nil && rows == 0 {
-		_, err = execWithRetry(s.db, `INSERT OR REPLACE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt, updated_at) VALUES(1, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt)
+		_, err = execWithRetry(s.db, `INSERT OR REPLACE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt, metadata_prompt, updated_at) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, settings.DefaultModel, settings.DefaultMode, settings.DefaultFormat, auto, string(hooks), settings.PreferredLanguage, settings.CleanupPrompt, settings.MetadataPrompt)
 	}
 	return err
 }
 
 func (s *server) ensureSettingsRow() error {
-	if _, err := execWithRetry(s.db, `INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt) VALUES(1, ?, ?, ?, 0, '[]', '', '')`, defaultTranscriptionModel, defaultTranscriptionMode, defaultTranscriptionFormat); err != nil {
+	if _, err := execWithRetry(s.db, `INSERT OR IGNORE INTO app_settings(id, default_model, default_mode, default_format, auto_translate, webhook_endpoints, preferred_language, cleanup_prompt, metadata_prompt) VALUES(1, ?, ?, ?, 0, '[]', '', '', '')`, defaultTranscriptionModel, defaultTranscriptionMode, defaultTranscriptionFormat); err != nil {
 		return err
 	}
-	_, err := execWithRetry(s.db, `UPDATE app_settings SET cleanup_prompt = COALESCE(NULLIF(cleanup_prompt, ''), ?) WHERE id=1`, defaultCleanupPrompt)
+	if _, err := execWithRetry(s.db, `UPDATE app_settings SET cleanup_prompt = COALESCE(NULLIF(cleanup_prompt, ''), ?) WHERE id=1`, defaultCleanupPrompt); err != nil {
+		return err
+	}
+	_, err := execWithRetry(s.db, `UPDATE app_settings SET metadata_prompt = COALESCE(NULLIF(metadata_prompt, ''), ?) WHERE id=1`, defaultMetadataPrompt)
 	return err
 }
 
 func (s *server) getTranscription(filename string) (*transcription, error) {
 	var t transcription
 	if err := queryRowWithRetry(s.db, func(row *sql.Row) error {
-		return row.Scan(&t.ID, &t.Filename, &t.SourcePath, &t.ProcessedPath, &t.Source, &t.Transcript, &t.RawTranscript, &t.CleanTranscript, &t.Translation, &t.Status, &t.LastError, &t.SizeBytes, &t.DurationSeconds, &t.Hash, &t.DuplicateOf, &t.RequestedModel, &t.RequestedMode, &t.RequestedFormat, &t.ActualModel, &t.DiarizedJSON, &t.RecognizedTowns, &t.NormalizedTranscript, &t.CallType, &t.CallTimestamp, &t.TagsJSON, &t.Latitude, &t.Longitude, &t.LocationLabel, &t.LocationSource, &t.CreatedAt, &t.UpdatedAt)
-	}, `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
+		return scanTranscription(row, &t)
+	}, `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions WHERE filename = ?`, filename); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -3672,8 +4000,8 @@ func (s *server) updateProcessedPath(filename, processedPath string) error {
 	return err
 }
 
-func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string, diarized *string, towns *string, normalized *string, actualModel *string, callType *string, tags *string, lat *float64, lon *float64, label *string, source *string) error {
-	_, err := execWithRetry(s.db, `UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(?, tags), latitude=?, longitude=?, location_label=COALESCE(?, location_label), location_source=COALESCE(?, location_source) WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, tags, lat, lon, label, source, filename)
+func (s *server) markDoneWithDetails(filename string, note string, raw *string, clean *string, translation *string, duplicateOf *string, diarized *string, towns *string, normalized *string, actualModel *string, callType *string, tags *string, lat *float64, lon *float64, label *string, source *string, metadataJSON *string, addressJSON *string, manualReview bool) error {
+	_, err := execWithRetry(s.db, `UPDATE transcriptions SET status=?, transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, last_error=?, duplicate_of=?, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(?, tags), latitude=?, longitude=?, location_label=COALESCE(?, location_label), location_source=COALESCE(?, location_source), refined_metadata=COALESCE(?, refined_metadata), address_json=COALESCE(?, address_json), needs_manual_review=? WHERE filename=?`, statusDone, clean, raw, clean, translation, nullableString(note), duplicateOf, diarized, towns, normalized, actualModel, callType, tags, lat, lon, label, source, metadataJSON, addressJSON, boolToInt(manualReview), filename)
 	return err
 }
 
@@ -3689,6 +4017,70 @@ func nullableString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func optionalString(s string) *string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+func scanTranscription(row rowScanner, t *transcription) error {
+	var manual sql.NullInt64
+	err := row.Scan(
+		&t.ID,
+		&t.Filename,
+		&t.SourcePath,
+		&t.ProcessedPath,
+		&t.Source,
+		&t.Transcript,
+		&t.RawTranscript,
+		&t.CleanTranscript,
+		&t.Translation,
+		&t.Status,
+		&t.LastError,
+		&t.SizeBytes,
+		&t.DurationSeconds,
+		&t.Hash,
+		&t.DuplicateOf,
+		&t.RequestedModel,
+		&t.RequestedMode,
+		&t.RequestedFormat,
+		&t.ActualModel,
+		&t.DiarizedJSON,
+		&t.RecognizedTowns,
+		&t.NormalizedTranscript,
+		&t.CallType,
+		&t.CallTimestamp,
+		&t.TagsJSON,
+		&t.Latitude,
+		&t.Longitude,
+		&t.LocationLabel,
+		&t.LocationSource,
+		&t.RefinedMetadata,
+		&t.AddressJSON,
+		&manual,
+		&t.CreatedAt,
+		&t.UpdatedAt,
+	)
+	if err != nil {
+		return err
+	}
+	t.NeedsManualReview = manual.Valid && manual.Int64 == 1
+	return nil
 }
 
 func pointerString(s *string) *string {
@@ -3768,7 +4160,7 @@ func (s *server) copyFromDuplicate(filename, duplicate string) error {
 	if err != nil {
 		return err
 	}
-	_, err = execWithRetry(s.db, `UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(transcriptions.tags, ?), call_timestamp=COALESCE(transcriptions.call_timestamp, ?), latitude=COALESCE(?, latitude), longitude=COALESCE(?, longitude), location_label=COALESCE(?, location_label), location_source=COALESCE(?, location_source) WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, src.TagsJSON, src.CallTimestamp, src.Latitude, src.Longitude, src.LocationLabel, src.LocationSource, filename)
+	_, err = execWithRetry(s.db, `UPDATE transcriptions SET transcript_text=?, raw_transcript_text=?, clean_transcript_text=?, translation_text=?, status=?, last_error=NULL, diarized_json=?, recognized_towns=?, normalized_transcript=?, actual_openai_model_used=?, call_type=?, tags=COALESCE(transcriptions.tags, ?), call_timestamp=COALESCE(transcriptions.call_timestamp, ?), latitude=COALESCE(?, latitude), longitude=COALESCE(?, longitude), location_label=COALESCE(?, location_label), location_source=COALESCE(?, location_source), refined_metadata=COALESCE(?, refined_metadata), address_json=COALESCE(?, address_json), needs_manual_review=? WHERE filename=?`, src.Transcript, src.RawTranscript, src.CleanTranscript, src.Translation, statusDone, src.DiarizedJSON, src.RecognizedTowns, src.NormalizedTranscript, src.ActualModel, src.CallType, src.TagsJSON, src.CallTimestamp, src.Latitude, src.Longitude, src.LocationLabel, src.LocationSource, src.RefinedMetadata, src.AddressJSON, boolToInt(src.NeedsManualReview), filename)
 	return err
 }
 

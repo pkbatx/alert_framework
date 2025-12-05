@@ -1,0 +1,11 @@
+{
+  "nlp": {
+    "refinement_temperature": 0.15,
+    "cleanup_style": "succinct",
+    "address_mode": "sussex-biased",
+    "mapbox_bounding_box": [-75.2, 40.9, -74.3, 41.4],
+    "cleanup_prompt": "You are a Sussex County NJ emergency communications analyst. Follow the inline defaults or replace with your custom prompt text.",
+    "metadata_prompt": "You are the metadata-refinement agent for Lakeland EMS. Customize as needed.",
+    "address_prompt": "You extract structured addresses for Sussex County NJ incidents."
+  }
+}
