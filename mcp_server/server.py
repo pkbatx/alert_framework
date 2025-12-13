@@ -1,7 +1,7 @@
 import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from .client import AlertsClient
 
@@ -30,36 +30,28 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.rstrip("/") == "/healthz":
             self._respond({"ok": True})
             return
-        if self.path.startswith("/tools/"):
-            tool = self.path[len("/tools/") :]
-            try:
-                result = self.dispatch(tool, {})
-            except Exception as exc:  # noqa: BLE001
-                self.send_error(500, str(exc))
-                return
-            self._respond(result)
-            return
         self.send_error(404, "not found")
 
     def dispatch(self, tool: str, args: Dict[str, Any]):
         if tool in ("alerts.status", "status"):
             return self.client.status()
-        if tool in ("alerts.run_transcribe", "run_transcribe"):
-            return self.client.run_transcribe(**args)
-        if tool in ("alerts.run_enrich", "run_enrich"):
-            return self.client.run_enrich(**args)
-        if tool in ("alerts.run_publish", "run_publish"):
-            return self.client.run_publish(**args)
+        if tool in ("alerts.backfill", "backfill"):
+            return self.client.backfill(int(args.get("since_minutes", 60)), args.get("stages", []))
         if tool in ("alerts.reprocess", "reprocess"):
-            return self.client.reprocess(args.get("call_id"), args.get("stage"), args.get("force", False))
+            return self.client.reprocess(args.get("call_id"), args.get("stage"), bool(args.get("force", False)))
+        if tool in ("alerts.enqueue", "enqueue"):
+            return self.client.enqueue_stage(args.get("call_id"), args.get("stage"), args.get("params", {}))
         if tool in ("alerts.jobs", "jobs"):
-            return self.client.jobs()
-        if tool in ("alerts.job_status", "job_status"):
-            return self.client.job_status(args.get("job_id", ""))
-        if tool in ("alerts.tail_job", "tail_job"):
-            return {"lines": self.client.tail_job(args.get("job_id", ""), args.get("seconds", 30))}
+            return {"jobs": self.client.jobs()}
         if tool in ("alerts.briefing", "briefing"):
-            return self.client.briefing(args.get("since_minutes", 360), args.get("format", "bullets"))
+            data = self.client.briefing_data()
+            return {"briefing_data": data}
+        if tool in ("alerts.anomalies", "anomalies"):
+            return self.client.anomalies(int(args.get("since_minutes", 60)))
+        if tool in ("alerts.tail_job", "tail_job"):
+            job_id = int(args.get("job_id", 0))
+            seconds = int(args.get("seconds", 30))
+            return {"lines": self.client.tail_job(job_id, seconds)}
         raise ValueError(f"unknown tool {tool}")
 
     def _respond(self, payload: Dict[str, Any]):

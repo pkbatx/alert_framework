@@ -282,3 +282,10 @@ Guarantees
         •       Do not modify ingest → metadata → alert → DB → transcription lifecycle.
         •       Preserve existing API contracts, GroupMe URLs, and file naming/paths; processed audio coexists alongside raw archives.
         •       Make processing configurable via env/config files and gracefully fall back to raw audio on failure.
+
+Control Plane (MCP)
+-------------------
+- MCP tools must call the Go data plane over `/ops/*` and `/api/*`; direct DB or filesystem access is prohibited by default.
+- All tools are idempotent, evidence-first, and must cite `call_id` values when summarizing or diagnosing.
+- Jobs orchestrated by MCP must respect the deterministic stage order: INGEST → PREPROCESS → ALERT_INITIAL → TRANSCRIBE → NORMALIZE → ENRICH → PUBLISH.
+- Dangerous operations remain gated by `ENABLE_DANGEROUS_OPS` and the environment guard; do not log secrets or raw credentials.
