@@ -213,3 +213,16 @@ func (q *Queue) Healthy() bool {
 	defer q.mu.RUnlock()
 	return q.started
 }
+
+// Reset drains pending jobs and clears bookkeeping. Running jobs continue until completion.
+func (q *Queue) Reset() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.jobs == nil {
+		return
+	}
+	for len(q.jobs) > 0 {
+		<-q.jobs
+	}
+	q.enqueued = make(map[string]struct{})
+}

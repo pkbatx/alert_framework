@@ -1,0 +1,25 @@
+version: '3.9'
+services:
+  app:
+    build: .
+    environment:
+      - CALLS_DIR=/data/calls
+      - WORK_DIR=/data/work
+      - DB_PATH=/data/work/transcriptions.db
+    volumes:
+      - ./data:/data
+    ports:
+      - "8000:8000"
+  mcp:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - ALERTS_API_BASE=http://app:8000
+      - MCP_PORT=8787
+    command: ["python", "-m", "mcp_server.server"]
+    depends_on:
+      - app
+    ports:
+      - "8787:8787"
