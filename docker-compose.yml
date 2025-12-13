@@ -6,17 +6,20 @@ services:
       - CALLS_DIR=/data/calls
       - WORK_DIR=/data/work
       - DB_PATH=/data/work/transcriptions.db
+      - PORT=8080
+      - ENABLE_DANGEROUS_OPS=false
+      - ENVIRONMENT=local
     volumes:
       - ./data:/data
     ports:
-      - "8000:8000"
+      - "8080:8080"
   mcp:
     image: python:3.11-slim
     working_dir: /app
     volumes:
       - .:/app
     environment:
-      - ALERTS_API_BASE=http://app:8000
+      - ALERTS_API_BASE=http://app:8080
       - MCP_PORT=8787
     command: ["python", "-m", "mcp_server.server"]
     depends_on:

@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/google/uuid v1.3.0
-	golang.org/x/image v0.33.0
+	github.com/joho/godotenv v1.5.1
 	modernc.org/sqlite v1.27.0
 )
 
