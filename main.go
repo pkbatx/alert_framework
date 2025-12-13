@@ -357,6 +357,7 @@ type server struct {
 	queue         *queue.Queue
 	metrics       *metrics.Metrics
 	running       sync.Map // filename -> struct{}
+	opsLogs       *opsLogHub
 	client        *http.Client
 	botID         string
 	shutdown      chan struct{}
@@ -459,6 +460,7 @@ func main() {
 		metrics:  m,
 		tz:       tz,
 		ctx:      ctx,
+		opsLogs:  newOpsLogHub(200),
 	}
 
 	refiner, err := refine.NewService(s.client, cfg)
@@ -479,9 +481,24 @@ func main() {
 	mux.HandleFunc("/api/transcriptions", s.handleTranscriptions)
 	mux.HandleFunc("/api/transcription/", s.handleTranscription)
 	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
+	mux.HandleFunc("/api/calls", s.handleCalls)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/stats/last6h", s.handleLastSixHoursStats)
 	mux.HandleFunc("/api/hotspots", s.handleHotspots)
+	mux.HandleFunc("/ops/status", s.handleOpsStatus)
+	mux.HandleFunc("/ops/transcribe/run", func(w http.ResponseWriter, r *http.Request) { s.handleOpsRun(w, r, "transcribe") })
+	mux.HandleFunc("/ops/enrich/run", func(w http.ResponseWriter, r *http.Request) { s.handleOpsRun(w, r, "enrich") })
+	mux.HandleFunc("/ops/publish/run", func(w http.ResponseWriter, r *http.Request) { s.handleOpsRun(w, r, "publish") })
+	mux.HandleFunc("/ops/reprocess", s.handleOpsReprocess)
+	mux.HandleFunc("/ops/jobs", s.handleOpsJobs)
+	mux.HandleFunc("/ops/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			s.handleOpsLogs(w, r)
+			return
+		}
+		s.handleOpsJobDetail(w, r)
+	})
+	mux.HandleFunc("/ops/reset", s.handleOpsReset)
 	mux.HandleFunc("/preview/", s.handlePreview)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
@@ -633,6 +650,7 @@ func initDB(db *sql.DB) error {
 		{version: 4, name: "add location columns", up: migrateAddLocationColumns},
 		{version: 5, name: "add processed audio path", up: migrateAddProcessedPath},
 		{version: 6, name: "normalize call timestamps to utc", up: migrateNormalizeCallTimestampUTC},
+		{version: 7, name: "add ops tables", up: migrateAddOpsTables},
 	}
 	return applyMigrations(db, migrations)
 }
@@ -866,6 +884,30 @@ func migrateNormalizeCallTimestampUTC(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func migrateAddOpsTables(db *sql.DB) error {
+	schema := `CREATE TABLE IF NOT EXISTS ops_job (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload TEXT NULL,
+    accepted INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    started_at DATETIME,
+    finished_at DATETIME,
+    last_error TEXT
+);
+CREATE TABLE IF NOT EXISTS ops_job_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+    level TEXT,
+    message TEXT,
+    FOREIGN KEY(job_id) REFERENCES ops_job(id)
+);`
+	_, err := execWithRetry(db, schema)
+	return err
 }
 
 func parseTimestampFlexible(raw string, tz *time.Location) (time.Time, error) {
@@ -1249,7 +1291,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			log.Printf("failed to mirror duplicate data: %v", err)
 		}
 		note := fmt.Sprintf("duplicate of %s", dup)
-			s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
+		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
 		if j.sendGroupMe {
 			followup := fmt.Sprintf("%s transcript is duplicate of %s", filename, dup)
 			_ = s.sendGroupMe(followup)
@@ -2483,7 +2525,7 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 	windowName, windowDuration := normalizeWindowName(rawWindow, "6h")
 
 	baseURL := s.resolveBaseURL(r)
-query := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
+	query := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
 	args := []interface{}{}
 	var cutoff time.Time
 	if windowDuration > 0 {
@@ -2683,7 +2725,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	windowName, windowDuration := normalizeWindowName(rawWindow, "24h")
 
-base := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
+	base := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
 	where := []string{}
 	args := []interface{}{}
 	var cutoff time.Time
@@ -2766,6 +2808,90 @@ base := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_sourc
 	}
 
 	respondJSON(w, callListResponse{Window: windowName, Calls: filtered, Stats: stats, MapboxToken: s.cfg.MapboxToken})
+}
+
+func (s *server) handleCalls(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sinceMinutes, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("since_minutes")))
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	var where []string
+	var args []interface{}
+	if sinceMinutes > 0 {
+		cutoff := time.Now().UTC().Add(-time.Duration(sinceMinutes) * time.Minute)
+		where = append(where, "COALESCE(call_timestamp, created_at) >= ?")
+		args = append(args, cutoff)
+	}
+	base := `SELECT filename, COALESCE(call_timestamp, created_at) as ts, tags, location_label, latitude, longitude, transcript_text, clean_transcript_text FROM transcriptions`
+	if len(where) > 0 {
+		base += " WHERE " + strings.Join(where, " AND ")
+	}
+	base += " ORDER BY COALESCE(call_timestamp, created_at) DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := queryWithRetry(s.db, base, args...)
+	if err != nil {
+		log.Printf("calls query failed: %v", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	type call struct {
+		ID                string    `json:"id"`
+		Timestamp         time.Time `json:"ts"`
+		Tags              []string  `json:"tags"`
+		Location          string    `json:"location"`
+		HasTranscript     bool      `json:"has_transcript"`
+		HasGeocode        bool      `json:"has_geocode"`
+		TranscriptPreview string    `json:"transcript_preview"`
+	}
+	var resp []call
+	for rows.Next() {
+		var filename string
+		var ts time.Time
+		var tags sql.NullString
+		var loc sql.NullString
+		var lat, lon sql.NullFloat64
+		var transcript sql.NullString
+		var clean sql.NullString
+		if err := rows.Scan(&filename, &ts, &tags, &loc, &lat, &lon, &transcript, &clean); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		var tagList []string
+		if tags.Valid {
+			_ = json.Unmarshal([]byte(tags.String), &tagList)
+		}
+		preview := ""
+		if clean.Valid && strings.TrimSpace(clean.String) != "" {
+			preview = truncatePreview(clean.String)
+		} else if transcript.Valid {
+			preview = truncatePreview(transcript.String)
+		}
+		resp = append(resp, call{
+			ID:                filename,
+			Timestamp:         ts,
+			Tags:              tagList,
+			Location:          loc.String,
+			HasTranscript:     transcript.Valid || clean.Valid,
+			HasGeocode:        lat.Valid && lon.Valid,
+			TranscriptPreview: preview,
+		})
+	}
+	respondJSON(w, map[string]interface{}{"calls": resp})
+}
+
+func truncatePreview(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) > 280 {
+		return trimmed[:277] + "..."
+	}
+	return trimmed
 }
 
 func respondJSON(w http.ResponseWriter, v interface{}) {

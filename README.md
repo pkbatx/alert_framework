@@ -108,6 +108,49 @@ The backend watches this file and reloads templates at runtime—no restart requ
 - File watcher (fsnotify) only reacts to new `.mp3` writes/moves; use the UI controls to re-run transcription or formatting for existing calls.
 - The UI defaults to the last 24 hours of activity and polls the `/api/calls` endpoint every few seconds. Use the summary filters to inspect volume, tags, and hotspots.
 
+## Ops API
+
+Operators can trigger reprocessing and inspect pipeline health via a minimal control surface mounted under `/ops` on the existing HTTP server.
+
+- `GET /ops/status` – health snapshot including config summary, queue depth, pipeline counters, and DB status.
+- `POST /ops/transcribe/run` – enqueue transcription jobs for existing calls. Body: `{"call_ids": ["file.mp3"], "since_minutes": 60, "limit": 200, "force": false}`.
+- `POST /ops/enrich/run` – enqueue metadata enrichment for matching calls.
+- `POST /ops/publish/run` – enqueue publish jobs; optional `destination` of `groupme`, `ui`, or `both`.
+- `POST /ops/reprocess` – target a single call id with `{ "call_id": "file.mp3", "stage": "transcribe"|"enrich"|"publish", "force": false }`.
+- `GET /ops/jobs` – list recent ops jobs; `GET /ops/jobs/{id}` for details.
+- `GET /ops/jobs/{id}/logs` – SSE stream of per-job log lines.
+- `POST /ops/reset` – drain in-memory queue and mark in-flight work failed (only when `ENABLE_DANGEROUS_OPS=1`).
+
+All endpoints are idempotent where possible and avoid returning tokens or secrets.
+
+## MCP Sidecar
+
+An optional MCP companion exposes friendly tools that wrap the Ops API without touching files or the database directly.
+
+Run locally with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+The `mcp` service listens on port 8787 and proxies to the Go app on port 8000. Tools include:
+
+- `alerts.status()`
+- `alerts.run_transcribe(...)`
+- `alerts.run_enrich(...)`
+- `alerts.run_publish(..., destination="both")`
+- `alerts.reprocess(call_id, stage, force=False)`
+- `alerts.jobs()` / `alerts.job_status(job_id)`
+- `alerts.tail_job(job_id, seconds=30)`
+- `alerts.briefing(since_minutes=360, format="bullets")`
+
+Sample prompts:
+
+- "What's the current backlog?"
+- "Transcribe last 60 minutes"
+- "Generate a 6-hour briefing"
+- "Reprocess call <id> transcribe + publish"
+
 ## Docker
 
 A multi-stage image is provided (see `DOCKER.md`). In short:
