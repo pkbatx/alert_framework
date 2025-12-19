@@ -24,6 +24,6 @@ alert_server.exe
 .next/
 node_modules/
 web/.env.local
-runtime/calls/Lakeland_EMS__Duty__2025_12_17_21_52_58.mp3
+runtime/calls/*.mp3
 runtime/.DS_Store
 .DS_Store
