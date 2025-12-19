@@ -9,15 +9,15 @@ services:
     environment:
       ALERT_MODE: api
       HTTP_PORT: 8000
-      CALLS_DIR: /data/calls
-      WORK_DIR: /data/work
-      DB_PATH: /data/work/transcriptions.db
+      CALLS_DIR: /alert_framework_data/calls
+      WORK_DIR: /alert_framework_data/work
+      DB_PATH: /alert_framework_data/work/transcriptions.db
       CONFIG_PATH: /app/config/config.yaml
       STRICT_CONFIG: "true"
       IN_DOCKER: "true"
     volumes:
-      - ./data:/data
-      - ./runtime/calls:/data/calls
+      - ./runtime/calls:/alert_framework_data/calls
+      - ./runtime/work:/alert_framework_data/work
       - ./config:/app/config:ro
     ports:
       - "8000:8000"
@@ -47,15 +47,15 @@ services:
         BUILD_TIME: ${BUILD_TIME:-unknown}
     environment:
       ALERT_MODE: worker
-      CALLS_DIR: /data/calls
-      WORK_DIR: /data/work
-      DB_PATH: /data/work/transcriptions.db
+      CALLS_DIR: /alert_framework_data/calls
+      WORK_DIR: /alert_framework_data/work
+      DB_PATH: /alert_framework_data/work/transcriptions.db
       CONFIG_PATH: /app/config/config.yaml
       STRICT_CONFIG: "true"
       IN_DOCKER: "true"
     volumes:
-      - ./data:/data
-      - ./runtime/calls:/data/calls
+      - ./runtime/calls:/alert_framework_data/calls
+      - ./runtime/work:/alert_framework_data/work
       - ./config:/app/config:ro
     restart: unless-stopped
     stop_grace_period: 20s
