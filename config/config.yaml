@@ -7,5 +7,16 @@
     "cleanup_prompt": "You are a Sussex County NJ emergency communications analyst. Follow the inline defaults or replace with your custom prompt text.",
     "metadata_prompt": "You are the metadata-refinement agent for Lakeland EMS. Customize as needed.",
     "address_prompt": "You extract structured addresses for Sussex County NJ incidents."
+  },
+  "rollup": {
+    "lookback_hours": 6,
+    "chain_window_min": 30,
+    "radius_meters": 800,
+    "max_calls": 50,
+    "refresh_interval_sec": 60,
+    "llm_enabled": true,
+    "prompt_version": "v1",
+    "llm_model": "gpt-4o-mini",
+    "llm_base_url": "https://api.openai.com"
   }
 }

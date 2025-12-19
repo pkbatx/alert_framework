@@ -37,6 +37,7 @@ import (
 	"alert_framework/formatting"
 	"alert_framework/metrics"
 	"alert_framework/queue"
+	"alert_framework/rollups"
 	"alert_framework/version"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/image/font"
@@ -354,18 +355,21 @@ type AppSettings struct {
 }
 
 type server struct {
-	db            *sql.DB
-	queue         *queue.Queue
-	metrics       *metrics.Metrics
-	running       sync.Map // filename -> struct{}
-	client        *http.Client
-	botID         string
-	shutdown      chan struct{}
-	cfg           config.Config
-	tz            *time.Location
-	ctx           context.Context
-	locationCache sync.Map
-	refiner       *refine.Service
+	db             *sql.DB
+	queue          *queue.Queue
+	metrics        *metrics.Metrics
+	running        sync.Map // filename -> struct{}
+	client         *http.Client
+	botID          string
+	shutdown       chan struct{}
+	cfg            config.Config
+	tz             *time.Location
+	ctx            context.Context
+	locationCache  sync.Map
+	refiner        *refine.Service
+	rollups        *rollups.Service
+	rollupMu       sync.Mutex
+	rollupEnqueued bool
 }
 
 // QueueDebugResponse represents the payload returned from /debug/queue.
@@ -525,6 +529,7 @@ func main() {
 		}
 		s.refiner = refiner
 		defer refiner.Close()
+		s.rollups = rollups.NewService(db, s.client, cfg.Rollup)
 	}
 
 	if enableWorker {
@@ -533,6 +538,9 @@ func main() {
 		qStats := s.queue.Stats()
 		m.UpdateQueue(qStats.Length, qStats.Capacity, qStats.WorkerCount)
 		go s.watch()
+		if s.rollups != nil {
+			s.startRollupScheduler(ctx)
+		}
 	}
 
 	var httpServer *http.Server
@@ -544,6 +552,9 @@ func main() {
 		mux.HandleFunc("/api/settings", s.handleSettings)
 		mux.HandleFunc("/api/stats/last6h", s.handleLastSixHoursStats)
 		mux.HandleFunc("/api/hotspots", s.handleHotspots)
+		mux.HandleFunc("/api/rollups", s.handleRollups)
+		mux.HandleFunc("/api/rollups/", s.handleRollupDetail)
+		mux.HandleFunc("/api/rollups/recompute", s.handleRollupRecompute)
 		mux.HandleFunc("/api/version", s.handleVersion)
 		mux.HandleFunc("/preview/", s.handlePreview)
 		mux.HandleFunc("/healthz", s.handleHealth)
@@ -706,6 +717,7 @@ func initDB(db *sql.DB) error {
 		{version: 4, name: "add location columns", up: migrateAddLocationColumns},
 		{version: 5, name: "add processed audio path", up: migrateAddProcessedPath},
 		{version: 6, name: "normalize call timestamps to utc", up: migrateNormalizeCallTimestampUTC},
+		{version: 7, name: "add rollup tables", up: migrateAddRollups},
 	}
 	return applyMigrations(db, migrations)
 }
@@ -939,6 +951,61 @@ func migrateNormalizeCallTimestampUTC(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func migrateAddRollups(db *sql.DB) error {
+	schema := `CREATE TABLE IF NOT EXISTS rollups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rollup_key TEXT NOT NULL UNIQUE,
+    start_at DATETIME NOT NULL,
+    end_at DATETIME NOT NULL,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    municipality TEXT NULL,
+    poi TEXT NULL,
+    category TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    title TEXT NULL,
+    summary TEXT NULL,
+    evidence_json TEXT NULL,
+    confidence TEXT NULL,
+    status TEXT NOT NULL,
+    merge_suggestion TEXT NULL,
+    model_name TEXT NULL,
+    model_base_url TEXT NULL,
+    prompt_version TEXT NULL,
+    call_count INTEGER DEFAULT 0,
+    last_error TEXT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER IF NOT EXISTS rollups_updated_at
+AFTER UPDATE ON rollups
+BEGIN
+    UPDATE rollups SET updated_at = CURRENT_TIMESTAMP WHERE id = old.id;
+END;
+CREATE TABLE IF NOT EXISTS rollup_calls (
+    rollup_id INTEGER NOT NULL,
+    call_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (rollup_id, call_id),
+    FOREIGN KEY (rollup_id) REFERENCES rollups(id) ON DELETE CASCADE,
+    FOREIGN KEY (call_id) REFERENCES transcriptions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollups_updated_at ON rollups(updated_at);
+CREATE INDEX IF NOT EXISTS idx_rollups_window ON rollups(start_at, end_at);
+CREATE INDEX IF NOT EXISTS idx_rollup_calls_rollup ON rollup_calls(rollup_id);
+CREATE INDEX IF NOT EXISTS idx_rollup_calls_call ON rollup_calls(call_id);
+CREATE TABLE IF NOT EXISTS rollup_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME NULL,
+    status TEXT,
+    error TEXT,
+    rollup_count INTEGER DEFAULT 0
+);`
+	_, err := execWithRetry(db, schema)
+	return err
 }
 
 func parseTimestampFlexible(raw string, tz *time.Location) (time.Time, error) {

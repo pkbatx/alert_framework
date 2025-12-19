@@ -33,14 +33,16 @@ type Config struct {
 	NLPConfigPath      string
 	StrictConfig       bool
 	InDocker           bool
+	Rollup             RollupConfig
 }
 
 type fileConfig struct {
-	CallsDir string    `json:"calls_dir" yaml:"calls_dir"`
-	HTTPPort string    `json:"http_port" yaml:"http_port"`
-	WorkDir  string    `json:"work_dir" yaml:"work_dir"`
-	DBPath   string    `json:"db_path" yaml:"db_path"`
-	NLP      NLPConfig `json:"nlp" yaml:"nlp"`
+	CallsDir string           `json:"calls_dir" yaml:"calls_dir"`
+	HTTPPort string           `json:"http_port" yaml:"http_port"`
+	WorkDir  string           `json:"work_dir" yaml:"work_dir"`
+	DBPath   string           `json:"db_path" yaml:"db_path"`
+	NLP      NLPConfig        `json:"nlp" yaml:"nlp"`
+	Rollup   rollupFileConfig `json:"rollup" yaml:"rollup"`
 }
 
 const (
@@ -54,6 +56,45 @@ const (
 	defaultWorkerCount   = 4
 	defaultJobTimeoutSec = 60
 )
+
+// RollupConfig captures rollup grouping and LLM summarization settings.
+type RollupConfig struct {
+	LookbackHours      int
+	ChainWindowMin     int
+	RadiusMeters       float64
+	MaxCalls           int
+	RefreshIntervalSec int
+	LLMEnabled         bool
+	PromptVersion      string
+	LLMModel           string
+	LLMBaseURL         string
+}
+
+type rollupFileConfig struct {
+	LookbackHours      *int     `json:"lookback_hours" yaml:"lookback_hours"`
+	ChainWindowMin     *int     `json:"chain_window_min" yaml:"chain_window_min"`
+	RadiusMeters       *float64 `json:"radius_meters" yaml:"radius_meters"`
+	MaxCalls           *int     `json:"max_calls" yaml:"max_calls"`
+	RefreshIntervalSec *int     `json:"refresh_interval_sec" yaml:"refresh_interval_sec"`
+	LLMEnabled         *bool    `json:"llm_enabled" yaml:"llm_enabled"`
+	PromptVersion      string   `json:"prompt_version" yaml:"prompt_version"`
+	LLMModel           string   `json:"llm_model" yaml:"llm_model"`
+	LLMBaseURL         string   `json:"llm_base_url" yaml:"llm_base_url"`
+}
+
+func defaultRollupConfig() RollupConfig {
+	return RollupConfig{
+		LookbackHours:      6,
+		ChainWindowMin:     30,
+		RadiusMeters:       800,
+		MaxCalls:           50,
+		RefreshIntervalSec: 60,
+		LLMEnabled:         true,
+		PromptVersion:      "v1",
+		LLMModel:           "gpt-4o-mini",
+		LLMBaseURL:         "https://api.openai.com",
+	}
+}
 
 // Load reads configuration from environment variables and applies sane defaults.
 func Load() (Config, error) {
@@ -83,6 +124,8 @@ func Load() (Config, error) {
 		}
 		log.Printf("config load failed (%s): %v (using defaults)", configPath, fileErr)
 	}
+
+	cfg.Rollup = applyRollupOverrides(defaultRollupConfig(), fileCfg.Rollup)
 
 	cfg.CallsDir = firstNonEmpty(os.Getenv("CALLS_DIR"), fileCfg.CallsDir, defaultCallsDir)
 	cfg.WorkDir = firstNonEmpty(os.Getenv("WORK_DIR"), fileCfg.WorkDir, defaultWorkDir)
@@ -148,6 +191,62 @@ func Load() (Config, error) {
 		cfg.JobTimeoutSec = n
 	}
 
+	if v, ok, err := parseIntEnv("ROLLUP_LOOKBACK_HOURS"); err != nil {
+		if cfg.StrictConfig {
+			return cfg, fmt.Errorf("invalid ROLLUP_LOOKBACK_HOURS: %w", err)
+		}
+		log.Printf("invalid ROLLUP_LOOKBACK_HOURS: %v (using default)", err)
+	} else if ok && v > 0 {
+		cfg.Rollup.LookbackHours = v
+	}
+	if v, ok, err := parseIntEnv("ROLLUP_CHAIN_WINDOW_MIN"); err != nil {
+		if cfg.StrictConfig {
+			return cfg, fmt.Errorf("invalid ROLLUP_CHAIN_WINDOW_MIN: %w", err)
+		}
+		log.Printf("invalid ROLLUP_CHAIN_WINDOW_MIN: %v (using default)", err)
+	} else if ok && v > 0 {
+		cfg.Rollup.ChainWindowMin = v
+	}
+	if v, ok, err := parseFloatEnv("ROLLUP_RADIUS_METERS"); err != nil {
+		if cfg.StrictConfig {
+			return cfg, fmt.Errorf("invalid ROLLUP_RADIUS_METERS: %w", err)
+		}
+		log.Printf("invalid ROLLUP_RADIUS_METERS: %v (using default)", err)
+	} else if ok && v > 0 {
+		cfg.Rollup.RadiusMeters = v
+	}
+	if v, ok, err := parseIntEnv("ROLLUP_MAX_CALLS"); err != nil {
+		if cfg.StrictConfig {
+			return cfg, fmt.Errorf("invalid ROLLUP_MAX_CALLS: %w", err)
+		}
+		log.Printf("invalid ROLLUP_MAX_CALLS: %v (using default)", err)
+	} else if ok && v > 0 {
+		cfg.Rollup.MaxCalls = v
+	}
+	if v, ok, err := parseIntEnv("ROLLUP_REFRESH_INTERVAL_SEC"); err != nil {
+		if cfg.StrictConfig {
+			return cfg, fmt.Errorf("invalid ROLLUP_REFRESH_INTERVAL_SEC: %w", err)
+		}
+		log.Printf("invalid ROLLUP_REFRESH_INTERVAL_SEC: %v (using default)", err)
+	} else if ok && v > 0 {
+		cfg.Rollup.RefreshIntervalSec = v
+	}
+	if v := os.Getenv("ROLLUP_LLM_ENABLED"); strings.TrimSpace(v) != "" {
+		cfg.Rollup.LLMEnabled = parseBoolEnv("ROLLUP_LLM_ENABLED")
+	}
+	if v := strings.TrimSpace(os.Getenv("ROLLUP_PROMPT_VERSION")); v != "" {
+		cfg.Rollup.PromptVersion = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ROLLUP_LLM_MODEL")); v != "" {
+		cfg.Rollup.LLMModel = v
+	}
+	cfg.Rollup.LLMBaseURL = firstNonEmpty(
+		os.Getenv("ROLLUP_LLM_BASE_URL"),
+		os.Getenv("OPENAI_BASE_URL"),
+		os.Getenv("OPENAI_API_BASE"),
+		cfg.Rollup.LLMBaseURL,
+	)
+
 	nlpCfg, err := LoadNLPConfig(nlpPath)
 	if err != nil {
 		if cfg.StrictConfig {
@@ -204,6 +303,21 @@ func validateConfig(cfg Config) error {
 	if len(cfg.NLP.MapboxBoundingBox) != 0 && len(cfg.NLP.MapboxBoundingBox) != 4 {
 		return fmt.Errorf("nlp.mapbox_bounding_box must have 4 floats (got %d)", len(cfg.NLP.MapboxBoundingBox))
 	}
+	if cfg.Rollup.LookbackHours <= 0 {
+		return errors.New("rollup lookback hours must be positive")
+	}
+	if cfg.Rollup.ChainWindowMin <= 0 {
+		return errors.New("rollup chain window minutes must be positive")
+	}
+	if cfg.Rollup.RadiusMeters <= 0 {
+		return errors.New("rollup radius meters must be positive")
+	}
+	if cfg.Rollup.MaxCalls <= 0 {
+		return errors.New("rollup max calls must be positive")
+	}
+	if cfg.Rollup.RefreshIntervalSec <= 0 {
+		return errors.New("rollup refresh interval must be positive")
+	}
 	return nil
 }
 
@@ -244,4 +358,53 @@ func parseBoolEnvDefault(key string, defaultVal bool) bool {
 		return defaultVal
 	}
 	return parseBoolEnv(key)
+}
+
+func applyRollupOverrides(base RollupConfig, override rollupFileConfig) RollupConfig {
+	if override.LookbackHours != nil && *override.LookbackHours > 0 {
+		base.LookbackHours = *override.LookbackHours
+	}
+	if override.ChainWindowMin != nil && *override.ChainWindowMin > 0 {
+		base.ChainWindowMin = *override.ChainWindowMin
+	}
+	if override.RadiusMeters != nil && *override.RadiusMeters > 0 {
+		base.RadiusMeters = *override.RadiusMeters
+	}
+	if override.MaxCalls != nil && *override.MaxCalls > 0 {
+		base.MaxCalls = *override.MaxCalls
+	}
+	if override.RefreshIntervalSec != nil && *override.RefreshIntervalSec > 0 {
+		base.RefreshIntervalSec = *override.RefreshIntervalSec
+	}
+	if override.LLMEnabled != nil {
+		base.LLMEnabled = *override.LLMEnabled
+	}
+	if strings.TrimSpace(override.PromptVersion) != "" {
+		base.PromptVersion = strings.TrimSpace(override.PromptVersion)
+	}
+	if strings.TrimSpace(override.LLMModel) != "" {
+		base.LLMModel = strings.TrimSpace(override.LLMModel)
+	}
+	if strings.TrimSpace(override.LLMBaseURL) != "" {
+		base.LLMBaseURL = strings.TrimSpace(override.LLMBaseURL)
+	}
+	return base
+}
+
+func parseIntEnv(key string) (int, bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0, false, nil
+	}
+	val, err := strconv.Atoi(raw)
+	return val, true, err
+}
+
+func parseFloatEnv(key string) (float64, bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0, false, nil
+	}
+	val, err := strconv.ParseFloat(raw, 64)
+	return val, true, err
 }

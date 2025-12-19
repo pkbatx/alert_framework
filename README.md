@@ -9,6 +9,7 @@ A Go-based automation service that watches a directory of new radio call recordi
 - Persists all call context, transcripts, tags, locations, and regen history inside a local SQLite database.
 - Embedded frontend (vanilla JS + Plotly + Mapbox) remains for fallback, while the Next.js CAD console lives in `web/`.
 - Sussex-focused metadata inference verifies street-level addresses with Mapbox after (optional) LLM-backed cleanup, keeping Lakeland EMS calls pinned to Andover Township unless transcripts clearly say otherwise.
+- Call rollups cluster recent geo-resolved calls into incident summaries for the CAD console.
 - Ships with Docker support, optional audio preprocessing via `ffmpeg`, and zero external dependencies beyond OpenAI + GroupMe.
 
 See `agents.md` for the authoritative description of each agent (watcher, queue manager, workers, UI, etc.).
