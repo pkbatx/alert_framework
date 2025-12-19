@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-0.0.0-dev}
+        GIT_SHA: ${GIT_SHA:-dev}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    environment:
+      ALERT_MODE: api
+      HTTP_PORT: 8000
+      CALLS_DIR: /data/calls
+      WORK_DIR: /data/work
+      DB_PATH: /data/work/transcriptions.db
+      CONFIG_PATH: /app/config/config.yaml
+      STRICT_CONFIG: "true"
+      IN_DOCKER: "true"
+    volumes:
+      - ./data:/data
+      - ./runtime/calls:/data/calls
+      - ./config:/app/config:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-0.0.0-dev}
+        GIT_SHA: ${GIT_SHA:-dev}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    environment:
+      ALERT_MODE: worker
+      CALLS_DIR: /data/calls
+      WORK_DIR: /data/work
+      DB_PATH: /data/work/transcriptions.db
+      CONFIG_PATH: /app/config/config.yaml
+      STRICT_CONFIG: "true"
+      IN_DOCKER: "true"
+    volumes:
+      - ./data:/data
+      - ./runtime/calls:/data/calls
+      - ./config:/app/config:ro
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_BUILD_SHA: ${GIT_SHA:-dev}
+        NEXT_PUBLIC_BUILD_TIME: ${BUILD_TIME:-unknown}
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      NEXT_PUBLIC_BUILD_SHA: ${GIT_SHA:-dev}
+      NEXT_PUBLIC_BUILD_TIME: ${BUILD_TIME:-unknown}
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped

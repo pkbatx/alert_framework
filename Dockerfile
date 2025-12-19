@@ -1,30 +1,32 @@
 # syntax=docker/dockerfile:1
 
-# Stage 1 — Builder
-FROM golang:1.24 AS builder
+FROM golang:1.24-alpine AS builder
 WORKDIR /app
+
+RUN apk add --no-cache ca-certificates ffmpeg
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build -o /app/bin/alert_framework .
 
-# Stage 2 — Runtime
-FROM debian:bookworm-slim
+ARG VERSION=0.0.0-dev
+ARG GIT_SHA=dev
+ARG BUILD_TIME=unknown
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+RUN CGO_ENABLED=0 go build -o /out/alert_server -ldflags "-s -w -X alert_framework/version.Version=${VERSION} -X alert_framework/version.GitSHA=${GIT_SHA} -X alert_framework/version.BuildTime=${BUILD_TIME}" .
 
-RUN mkdir -p /data/calls /data/work /data/last24 /data/tmp /alert_framework_data/work
+FROM alpine:3.20
 
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN apk add --no-cache ca-certificates ffmpeg
 
-COPY --from=builder /app/bin/alert_framework /app/alert_framework
+RUN addgroup -S app && adduser -S -G app app \\
+    && mkdir -p /data/calls /data/work \\
+    && chown -R app:app /data
+
+WORKDIR /app
+COPY --from=builder /out/alert_server /app/alert_server
+COPY config /app/config
 
 ENV CALLS_DIR=/data/calls \
     WORK_DIR=/data/work \
@@ -33,4 +35,8 @@ ENV CALLS_DIR=/data/calls \
 
 EXPOSE 8000
 
-ENTRYPOINT ["/entrypoint.sh"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8000/healthz || exit 1
+
+USER app
+
+ENTRYPOINT ["/app/alert_server"]

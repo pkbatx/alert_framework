@@ -1,0 +1,37 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      target: builder
+    command: ["go", "run", "."]
+    environment:
+      ALERT_MODE: all
+      HTTP_PORT: 8000
+      CALLS_DIR: /data/calls
+      WORK_DIR: /data/work
+      DB_PATH: /data/work/transcriptions.db
+      CONFIG_PATH: /app/config/config.yaml
+    volumes:
+      - ./:/app
+      - ./data:/data
+      - ./runtime/calls:/data/calls
+      - ./config:/app/config:ro
+    ports:
+      - "8000:8000"
+
+  web:
+    image: node:20-alpine
+    working_dir: /app
+    command: ["sh", "-c", "corepack enable && pnpm install && pnpm dev -p 3000"]
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      NEXT_PUBLIC_BUILD_SHA: dev
+      NEXT_PUBLIC_BUILD_TIME: dev
+    volumes:
+      - ./web:/app
+    ports:
+      - "3000:3000"
+    depends_on:
+      - app
