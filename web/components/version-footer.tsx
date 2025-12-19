@@ -8,7 +8,6 @@ type VersionInfo = {
   build_time: string;
 };
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const uiSha = process.env.NEXT_PUBLIC_BUILD_SHA || "dev";
 const uiTime = process.env.NEXT_PUBLIC_BUILD_TIME || "unknown";
 
@@ -18,7 +17,7 @@ export default function VersionFooter() {
 
   useEffect(() => {
     let canceled = false;
-    fetch(`${apiBase}/api/version`)
+    fetch(`/api/version`, { cache: "no-store" })
       .then((res) => {
         if (!res.ok) {
           throw new Error(`status ${res.status}`);

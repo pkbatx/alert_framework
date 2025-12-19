@@ -8,8 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
-
 const rollupSchema = z.object({
   rollup_id: z.number(),
   start_at: z.string(),
@@ -55,6 +53,11 @@ const callListSchema = z.object({
 });
 
 type Rollup = z.infer<typeof rollupSchema>;
+type Health = {
+  ok: boolean;
+  api: { ok: boolean; status: number };
+  rollups: { ok: boolean; status: number; reason: string };
+};
 
 type Filters = {
   from: string;
@@ -89,6 +92,7 @@ export default function RollupsPage() {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [calls, setCalls] = useState<z.infer<typeof callSchema>[]>([]);
   const [callsError, setCallsError] = useState<string | null>(null);
+  const [health, setHealth] = useState<Health | null>(null);
 
   const selectedRollup = useMemo(() => {
     if (!rollups.length) return null;
@@ -104,43 +108,68 @@ export default function RollupsPage() {
     if (filters.to) params.set("to", filters.to);
     if (filters.status) params.set("status", filters.status);
     params.set("limit", "200");
-
-    const response = await fetch(`${apiBase}/api/rollups?${params.toString()}`);
-    if (!response.ok) {
-      setError(`status ${response.status}`);
+    try {
+      const response = await fetch(`/api/rollups?${params.toString()}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        setError(`status ${response.status}`);
+        setLoading(false);
+        return;
+      }
+      const json = await response.json();
+      const parsed = rollupListSchema.safeParse(json);
+      if (!parsed.success) {
+        setError("invalid response");
+        setLoading(false);
+        return;
+      }
+      let next = parsed.data.rollups;
+      if (filters.category) {
+        next = next.filter((rollup) => rollup.category === filters.category);
+      }
+      if (filters.priority) {
+        next = next.filter((rollup) => rollup.priority === filters.priority);
+      }
+      if (filters.search) {
+        const q = filters.search.toLowerCase();
+        next = next.filter((rollup) =>
+          [rollup.title, rollup.summary, rollup.municipality, rollup.poi]
+            .filter(Boolean)
+            .some((value) => (value as string).toLowerCase().includes(q))
+        );
+      }
+      setRollups(next);
+      setSelectedId(next[0]?.rollup_id ?? null);
       setLoading(false);
-      return;
-    }
-    const json = await response.json();
-    const parsed = rollupListSchema.safeParse(json);
-    if (!parsed.success) {
-      setError("invalid response");
+    } catch (err) {
+      setError((err as Error).message || "network error");
       setLoading(false);
-      return;
     }
-    let next = parsed.data.rollups;
-    if (filters.category) {
-      next = next.filter((rollup) => rollup.category === filters.category);
-    }
-    if (filters.priority) {
-      next = next.filter((rollup) => rollup.priority === filters.priority);
-    }
-    if (filters.search) {
-      const q = filters.search.toLowerCase();
-      next = next.filter((rollup) =>
-        [rollup.title, rollup.summary, rollup.municipality, rollup.poi]
-          .filter(Boolean)
-          .some((value) => (value as string).toLowerCase().includes(q))
-      );
-    }
-    setRollups(next);
-    setSelectedId(next[0]?.rollup_id ?? null);
-    setLoading(false);
   }, [filters]);
 
   useEffect(() => {
     void loadRollups();
   }, [loadRollups]);
+
+  useEffect(() => {
+    let canceled = false;
+    fetch("/api/health", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data: Health) => {
+        if (!canceled) {
+          setHealth(data);
+        }
+      })
+      .catch(() => {
+        if (!canceled) {
+          setHealth(null);
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!selectedRollup) {
@@ -149,28 +178,28 @@ export default function RollupsPage() {
     }
     const fetchCalls = async () => {
       setCallsError(null);
-      const response = await fetch(
-        `${apiBase}/api/rollups/${selectedRollup.rollup_id}/calls`
-      );
-      if (!response.ok) {
-        setCallsError(`status ${response.status}`);
-        return;
+      try {
+        const response = await fetch(
+          `/api/rollups/${selectedRollup.rollup_id}/calls`,
+          { cache: "no-store" }
+        );
+        if (!response.ok) {
+          setCallsError(`status ${response.status}`);
+          return;
+        }
+        const json = await response.json();
+        const parsed = callListSchema.safeParse(json);
+        if (!parsed.success) {
+          setCallsError("invalid response");
+          return;
+        }
+        setCalls(parsed.data.calls);
+      } catch (err) {
+        setCallsError((err as Error).message || "network error");
       }
-      const json = await response.json();
-      const parsed = callListSchema.safeParse(json);
-      if (!parsed.success) {
-        setCallsError("invalid response");
-        return;
-      }
-      setCalls(parsed.data.calls);
     };
     void fetchCalls();
   }, [selectedRollup]);
-
-  const triggerRecompute = async () => {
-    await fetch(`${apiBase}/api/rollups/recompute`, { method: "POST" });
-    void loadRollups();
-  };
 
   return (
     <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
@@ -178,6 +207,21 @@ export default function RollupsPage() {
         <CardHeader>
           <CardTitle>Rollups</CardTitle>
           <div className="grid gap-2 text-xs text-slate-400">
+            {health?.rollups.reason === "disabled" && (
+              <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-2 text-xs text-slate-400">
+                Rollups disabled in the API configuration.
+              </div>
+            )}
+            {health?.rollups.reason === "unavailable" && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-300">
+                Rollups unavailable. Check worker and API connectivity.
+              </div>
+            )}
+            {health?.rollups.reason === "api_down" && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-300">
+                API unavailable.
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2">
               <input
                 className="rounded-md border border-panelBorder bg-slate-900/60 px-2 py-1"
@@ -235,9 +279,6 @@ export default function RollupsPage() {
             <div className="flex gap-2">
               <Button variant="secondary" size="sm" onClick={loadRollups}>
                 Apply filters
-              </Button>
-              <Button variant="ghost" size="sm" onClick={triggerRecompute}>
-                Recompute rollups
               </Button>
             </div>
           </div>

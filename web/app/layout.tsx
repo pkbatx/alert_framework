@@ -2,6 +2,7 @@ import "./globals.css";
 import Link from "next/link";
 import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
 
+import HeaderStatus from "@/components/header-status";
 import VersionFooter from "@/components/version-footer";
 
 const sans = Space_Grotesk({
@@ -35,12 +36,13 @@ export default function RootLayout({
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
-                  Alert Framework
+                  Alerts Console
                 </p>
                 <h1 className="text-2xl font-semibold text-slate-100">
-                  Sussex CAD Console
+                  Sussex County CAD
                 </h1>
               </div>
+              <HeaderStatus />
               <nav className="flex items-center gap-4 text-sm text-slate-300">
                 <Link className="hover:text-white" href="/calls">
                   Calls

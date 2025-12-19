@@ -83,6 +83,9 @@ All settings are sourced from environment variables (or `.env`). Common options:
 | `JOB_TIMEOUT_SEC` | Max seconds a worker may hold a job | `60` |
 | `DEV_UI` | Enables extra UI traces/tooling when truthy | `false` |
 | `NLP_CONFIG_PATH` | Path to the GPT-5.1 prompt template file | `config/config.yaml` |
+| `API_BASE_URL` | Web proxy upstream base URL | `http://localhost:8000` |
+| `ENABLE_ADMIN_ACTIONS` | Enable admin-only mutating endpoints | `false` |
+| `ADMIN_TOKEN` | Token required for admin actions | empty |
 | `ALERT_MODE` | Service role (`api`, `worker`, `all`) | `all` |
 | `STRICT_CONFIG` | Fail fast on config errors | `false` |
 | `IN_DOCKER` | Enables Docker-specific safeguards | `false` |
@@ -114,7 +117,7 @@ The backend watches this file and reloads templates at runtime—no restart requ
 - `go run .` still runs everything in one process if you prefer the embedded UI.
 - `make reset` clears Next.js caches and stops rogue listeners on ports 3000/8000.
 - File watcher (fsnotify) only reacts to new `.mp3` writes/moves; use the UI controls to re-run transcription or formatting for existing calls.
-- The UI defaults to the last 24 hours of activity and polls the `/api/calls` endpoint every few seconds. Use the summary filters to inspect volume, tags, and hotspots.
+- The UI defaults to the last 24 hours of activity and reads from the `/api/calls` proxy endpoint on the same origin.
 
 ## Docker
 
@@ -132,6 +135,18 @@ Mount a persistent volume for `/data` (or whichever directories you place in `CA
 go test ./...
 npm test
 ```
+
+## Acceptance Checklist
+
+```bash
+docker compose up -d --build
+curl -sS http://localhost:3000/api/calls?window=24h | head -c 200
+curl -sS http://localhost:3000/api/health
+```
+
+- Web console loads calls or shows “No calls in the last 24h”.
+- Browser Network calls `/api/calls` (same-origin), not `:8000` directly.
+- No mutating actions are visible in the default UI.
 
 The Go tests cover configuration, formatting, and queue helpers, while the Node tests validate small UI utilities. Extend these test suites before shipping new enhancements.
 

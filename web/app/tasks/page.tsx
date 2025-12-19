@@ -3,8 +3,6 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
-
 type QueueStats = {
   length: number;
   capacity: number;
@@ -19,7 +17,7 @@ export default function TasksPage() {
 
   useEffect(() => {
     let canceled = false;
-    fetch(`${apiBase}/debug/queue`)
+    fetch(`/api/queue`, { cache: "no-store" })
       .then((res) => {
         if (!res.ok) {
           throw new Error(`status ${res.status}`);

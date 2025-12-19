@@ -79,6 +79,8 @@ services:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
       NEXT_PUBLIC_BUILD_SHA: ${GIT_SHA:-dev}
       NEXT_PUBLIC_BUILD_TIME: ${BUILD_TIME:-unknown}
+      API_BASE_URL: http://api:8000
+      IN_DOCKER: "true"
     ports:
       - "3000:3000"
     depends_on:

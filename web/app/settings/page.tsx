@@ -1,6 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const uiSha = process.env.NEXT_PUBLIC_BUILD_SHA || "dev";
 const uiTime = process.env.NEXT_PUBLIC_BUILD_TIME || "unknown";
 
@@ -14,7 +13,7 @@ export default function SettingsPage() {
         <CardContent className="space-y-2 text-sm text-slate-300">
           <div>
             <p className="text-xs uppercase text-slate-500">API Base URL</p>
-            <p className="font-mono text-sm">{apiBase}</p>
+            <p className="font-mono text-sm">Proxy via /api</p>
           </div>
           <div>
             <p className="text-xs uppercase text-slate-500">UI Build</p>
