@@ -4,5 +4,9 @@
   "type": "module",
   "scripts": {
     "test": "node --test static/*.test.js"
-  }
+  },
+  "devDependencies": {
+    "nx": "22.3.2"
+  },
+  "nx": {}
 }
