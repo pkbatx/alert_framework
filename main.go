@@ -1109,9 +1109,7 @@ func (s *server) watch() {
 				return
 			}
 			if evt.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
-				filename := filepath.Base(evt.Name)
-				log.Printf("detected new file: %s", filename)
-				s.handleNewFile(filename)
+				s.handleNewFile(evt.Name)
 			}
 		case err := <-watcher.Errors:
 			log.Printf("watch error: %v", err)
@@ -1121,12 +1119,30 @@ func (s *server) watch() {
 	}
 }
 
-func (s *server) handleNewFile(filename string) {
-	filename = strings.TrimSpace(filename)
-	if filename == "" {
+func (s *server) handleNewFile(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
 		log.Printf("skipping empty filename from watcher")
 		return
 	}
+	filename := filepath.Base(path)
+	if filename == "" || filename == "." {
+		return
+	}
+	if strings.HasPrefix(filename, ".") || strings.Contains(filename, ".writetest-") {
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg":
+	default:
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return
+	}
+	log.Printf("detected new file: %s", filename)
 	opts, _ := s.defaultOptions()
 	s.queueJob("watcher", filename, true, false, opts)
 }

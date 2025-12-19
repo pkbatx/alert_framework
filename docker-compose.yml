@@ -6,6 +6,8 @@ services:
         VERSION: ${VERSION:-0.0.0-dev}
         GIT_SHA: ${GIT_SHA:-dev}
         BUILD_TIME: ${BUILD_TIME:-unknown}
+    env_file:
+      - ./.env
     environment:
       ALERT_MODE: api
       HTTP_PORT: 8000
@@ -45,6 +47,8 @@ services:
         VERSION: ${VERSION:-0.0.0-dev}
         GIT_SHA: ${GIT_SHA:-dev}
         BUILD_TIME: ${BUILD_TIME:-unknown}
+    env_file:
+      - ./.env
     environment:
       ALERT_MODE: worker
       CALLS_DIR: /alert_framework_data/calls
