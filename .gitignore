@@ -5,6 +5,9 @@ alert_server
 
 # Local data and secrets
 .env
+.venv/
+__pycache__/
+*.pyc
 data/
 *.db
 *.db-shm
@@ -28,6 +31,8 @@ web/.env.local
 runtime/calls/*.mp3
 runtime/.DS_Store
 .DS_Store
+runtime/
+models/*.gguf
 
 
 

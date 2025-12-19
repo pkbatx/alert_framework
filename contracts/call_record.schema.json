@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CallRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "ts",
+    "source",
+    "audio_path",
+    "transcript_path",
+    "metadata_path",
+    "rollup_path",
+    "status"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "ts": { "type": "string" },
+    "source": { "type": "string" },
+    "audio_path": { "type": "string" },
+    "transcript_path": { "type": "string" },
+    "metadata_path": { "type": "string" },
+    "rollup_path": { "type": "string" },
+    "status": { "type": "string" }
+  }
+}

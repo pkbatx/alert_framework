@@ -106,3 +106,21 @@ services:
         reservations:
           cpus: "0.10"
           memory: 128m
+
+  localai:
+    image: localai/localai:latest-aio-cpu
+    env_file:
+      - ./.env
+    environment:
+      MODELS_PATH: /models
+    volumes:
+      - ./models:/models
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped

@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["call_type", "location", "notes", "tags"],
+  "properties": {
+    "call_type": { "type": "string" },
+    "location": { "type": "string" },
+    "notes": { "type": "string" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

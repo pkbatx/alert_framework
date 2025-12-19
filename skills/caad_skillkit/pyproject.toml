@@ -1,0 +1,19 @@
+[project]
+name = "caad-skillkit"
+version = "0.1.0"
+description = "Repo-local CAAD skillkit helpers"
+requires-python = ">=3.11"
+dependencies = [
+  "click",
+  "requests",
+  "pydantic",
+  "jsonschema",
+  "openai",
+]
+
+[project.scripts]
+caad = "caad_skillkit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
