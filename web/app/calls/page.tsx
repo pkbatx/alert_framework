@@ -13,6 +13,7 @@ const callRowSchema = z.object({
   ts: z.string(),
   title: z.string().optional().nullable(),
   summary: z.string().optional().nullable(),
+  transcript: z.string().optional().nullable(),
   source: z.string().optional().nullable(),
   audio_url: z.string().optional().nullable(),
   status: z.string().optional().nullable(),
