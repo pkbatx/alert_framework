@@ -21,3 +21,6 @@ alert_server
 alert_server.exe
 *.db
 *.db-*
+.next/
+node_modules/
+web/.env.local
