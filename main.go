@@ -37,6 +37,7 @@ import (
 	"alert_framework/formatting"
 	"alert_framework/metrics"
 	"alert_framework/queue"
+	"alert_framework/version"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
@@ -395,9 +396,13 @@ func prepareFilesystem(cfg config.Config) error {
 		cfg.CallsDir,
 		cfg.WorkDir,
 		filepath.Dir(cfg.DBPath),
-		"/data/last24",
-		"/data/tmp",
-		"/alert_framework_data/work",
+	}
+	if cfg.InDocker {
+		required = append(required,
+			"/data/last24",
+			"/data/tmp",
+			"/alert_framework_data/work",
+		)
 	}
 	for _, dir := range required {
 		dir = strings.TrimSpace(dir)
@@ -411,10 +416,59 @@ func prepareFilesystem(cfg config.Config) error {
 	return nil
 }
 
+func ensureWritableDir(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("empty path")
+	}
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(path, ".writetest-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(name); err != nil {
+		return err
+	}
+	return nil
+}
+
+func parseAlertMode(value string) string {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	switch mode {
+	case "", "all":
+		return "all"
+	case "api":
+		return "api"
+	case "worker":
+		return "worker"
+	default:
+		log.Printf("unknown ALERT_MODE %q, defaulting to all", value)
+		return "all"
+	}
+}
+
 func main() {
+	config.LoadDotEnv(".env")
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
+	}
+
+	mode := parseAlertMode(os.Getenv("ALERT_MODE"))
+	enableHTTP := mode == "all" || mode == "api"
+	enableWorker := mode == "all" || mode == "worker"
+	switch mode {
+	case "api":
+		log.Printf("startup mode=api (HTTP enabled, worker disabled)")
+	case "worker":
+		log.Printf("startup mode=worker (worker enabled, HTTP disabled)")
+	default:
+		log.Printf("startup mode=all (HTTP enabled, worker enabled)")
 	}
 
 	audioFilterEnabled = cfg.AudioFilterEnabled
@@ -430,14 +484,16 @@ func main() {
 		tz = time.Local
 	}
 
-	if err := os.MkdirAll(cfg.CallsDir, 0755); err != nil {
-		log.Fatalf("failed to ensure calls dir: %v", err)
-	}
-	if err := os.MkdirAll(cfg.WorkDir, 0755); err != nil {
-		log.Fatalf("failed to ensure work dir: %v", err)
-	}
 	if err := prepareFilesystem(cfg); err != nil {
 		log.Fatalf("filesystem prep failed: %v", err)
+	}
+	if cfg.StrictConfig || cfg.InDocker {
+		if err := ensureWritableDir(cfg.CallsDir); err != nil {
+			log.Fatalf("CALLS_DIR not writable (%s): %v", cfg.CallsDir, err)
+		}
+		if err := ensureWritableDir(cfg.WorkDir); err != nil {
+			log.Fatalf("WORK_DIR not writable (%s): %v", cfg.WorkDir, err)
+		}
 	}
 
 	db, err := openDB(cfg.DBPath)
@@ -461,36 +517,44 @@ func main() {
 		ctx:      ctx,
 	}
 
-	refiner, err := refine.NewService(s.client, cfg)
-	if err != nil {
-		log.Fatalf("refine init failed: %v", err)
+	var refiner *refine.Service
+	if enableWorker {
+		refiner, err = refine.NewService(s.client, cfg)
+		if err != nil {
+			log.Fatalf("refine init failed: %v", err)
+		}
+		s.refiner = refiner
+		defer refiner.Close()
 	}
-	s.refiner = refiner
-	defer refiner.Close()
 
-	s.queue = queue.New(cfg.JobQueueSize, cfg.WorkerCount, time.Duration(cfg.JobTimeoutSec)*time.Second, m)
-	s.queue.Start(ctx)
-	qStats := s.queue.Stats()
-	m.UpdateQueue(qStats.Length, qStats.Capacity, qStats.WorkerCount)
+	if enableWorker {
+		s.queue = queue.New(cfg.JobQueueSize, cfg.WorkerCount, time.Duration(cfg.JobTimeoutSec)*time.Second, m)
+		s.queue.Start(ctx)
+		qStats := s.queue.Stats()
+		m.UpdateQueue(qStats.Length, qStats.Capacity, qStats.WorkerCount)
+		go s.watch()
+	}
 
-	go s.watch()
+	var httpServer *http.Server
+	if enableHTTP {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/transcriptions", s.handleTranscriptions)
+		mux.HandleFunc("/api/transcription/", s.handleTranscription)
+		mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
+		mux.HandleFunc("/api/settings", s.handleSettings)
+		mux.HandleFunc("/api/stats/last6h", s.handleLastSixHoursStats)
+		mux.HandleFunc("/api/hotspots", s.handleHotspots)
+		mux.HandleFunc("/api/version", s.handleVersion)
+		mux.HandleFunc("/preview/", s.handlePreview)
+		mux.HandleFunc("/healthz", s.handleHealth)
+		mux.HandleFunc("/readyz", s.handleReady)
+		mux.HandleFunc("/debug/queue", s.handleDebugQueue)
+		mux.HandleFunc("/", s.handleRoot)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/transcriptions", s.handleTranscriptions)
-	mux.HandleFunc("/api/transcription/", s.handleTranscription)
-	mux.HandleFunc("/api/transcription", s.handleTranscriptionIndex)
-	mux.HandleFunc("/api/settings", s.handleSettings)
-	mux.HandleFunc("/api/stats/last6h", s.handleLastSixHoursStats)
-	mux.HandleFunc("/api/hotspots", s.handleHotspots)
-	mux.HandleFunc("/preview/", s.handlePreview)
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/readyz", s.handleReady)
-	mux.HandleFunc("/debug/queue", s.handleDebugQueue)
-	mux.HandleFunc("/", s.handleRoot)
-
-	server := &http.Server{
-		Addr:    cfg.HTTPPort,
-		Handler: mux,
+		httpServer = &http.Server{
+			Addr:    cfg.HTTPPort,
+			Handler: mux,
+		}
 	}
 
 	go func() {
@@ -498,14 +562,23 @@ func main() {
 		close(s.shutdown)
 		ctxTimeout, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		s.queue.Stop(ctxTimeout)
-		_ = server.Shutdown(ctxTimeout)
+		if s.queue != nil {
+			s.queue.Stop(ctxTimeout)
+		}
+		if httpServer != nil {
+			_ = httpServer.Shutdown(ctxTimeout)
+		}
 	}()
 
-	log.Printf("server listening on %s", server.Addr)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("server error: %v", err)
+	if enableHTTP {
+		log.Printf("server listening on %s", httpServer.Addr)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server error: %v", err)
+		}
+		return
 	}
+
+	<-ctx.Done()
 }
 
 func getBotID(cfg config.Config) string {
@@ -971,6 +1044,10 @@ func (s *server) handleNewFile(filename string) {
 }
 
 func (s *server) queueJob(source, filename string, sendGroupMe bool, force bool, opts TranscriptionOptions) bool {
+	if s.queue == nil {
+		log.Printf("queue disabled; skipping enqueue for %s", filename)
+		return false
+	}
 	enqueued, _ := s.enqueueWithBackoff(context.Background(), source, filename, sendGroupMe, force, opts)
 	return enqueued
 }
@@ -1249,7 +1326,7 @@ func (s *server) processFile(ctx context.Context, j processJob) error {
 			log.Printf("failed to mirror duplicate data: %v", err)
 		}
 		note := fmt.Sprintf("duplicate of %s", dup)
-			s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
+		s.markDoneWithDetails(filename, note, nil, nil, nil, &dup, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
 		if j.sendGroupMe {
 			followup := fmt.Sprintf("%s transcript is duplicate of %s", filename, dup)
 			_ = s.sendGroupMe(followup)
@@ -2003,8 +2080,15 @@ func (s *server) sendGroupMe(text string) error {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	respondJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, map[string]string{
+		"version":    version.Version,
+		"git_sha":    version.GitSHA,
+		"build_time": version.BuildTime,
+	})
 }
 
 func (s *server) handleReady(w http.ResponseWriter, r *http.Request) {
@@ -2012,19 +2096,25 @@ func (s *server) handleReady(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if !s.queue.Healthy() {
-		http.Error(w, "queue not ready", http.StatusServiceUnavailable)
-		return
-	}
-	if stats := s.queue.Stats(); stats.WorkerCount <= 0 {
-		http.Error(w, "no workers", http.StatusServiceUnavailable)
-		return
+	if s.queue != nil {
+		if !s.queue.Healthy() {
+			http.Error(w, "queue not ready", http.StatusServiceUnavailable)
+			return
+		}
+		if stats := s.queue.Stats(); stats.WorkerCount <= 0 {
+			http.Error(w, "no workers", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ready"))
 }
 
 func (s *server) handleDebugQueue(w http.ResponseWriter, r *http.Request) {
+	if s.queue == nil {
+		http.Error(w, "queue disabled", http.StatusServiceUnavailable)
+		return
+	}
 	stats := s.queue.Stats()
 	s.metrics.UpdateQueue(stats.Length, stats.Capacity, stats.WorkerCount)
 	snapshot := s.metrics.Snapshot()
@@ -2296,6 +2386,10 @@ func (s *server) handleTranscriptionIndex(w http.ResponseWriter, r *http.Request
 			http.Error(w, "filename required", http.StatusBadRequest)
 			return
 		}
+		if s.queue == nil {
+			http.Error(w, "queue disabled", http.StatusServiceUnavailable)
+			return
+		}
 		opts, _ := s.defaultOptions()
 		s.queueJob("api", filename, false, true, opts)
 		respondJSON(w, map[string]string{"status": statusQueued, "filename": filename})
@@ -2361,6 +2455,10 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 			respondJSON(w, s.toResponse(*existing, base))
 			return
 		case statusError:
+			if s.queue == nil {
+				http.Error(w, "queue disabled", http.StatusServiceUnavailable)
+				return
+			}
 			s.queueJob("api", cleaned, false, true, opts)
 			respondJSON(w, map[string]interface{}{
 				"filename": existing.Filename,
@@ -2370,6 +2468,10 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.queue == nil {
+		http.Error(w, "queue disabled", http.StatusServiceUnavailable)
+		return
+	}
 	s.queueJob("api", cleaned, false, true, opts)
 	respondJSON(w, map[string]interface{}{
 		"filename": cleaned,
@@ -2483,7 +2585,7 @@ func (s *server) handleLastSixHoursStats(w http.ResponseWriter, r *http.Request)
 	windowName, windowDuration := normalizeWindowName(rawWindow, "6h")
 
 	baseURL := s.resolveBaseURL(r)
-query := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
+	query := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
 	args := []interface{}{}
 	var cutoff time.Time
 	if windowDuration > 0 {
@@ -2683,7 +2785,7 @@ func (s *server) handleTranscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	windowName, windowDuration := normalizeWindowName(rawWindow, "24h")
 
-base := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
+	base := `SELECT id, filename, source_path, processed_path, COALESCE(ingest_source,'') as ingest_source, transcript_text, raw_transcript_text, clean_transcript_text, translation_text, status, last_error, size_bytes, duration_seconds, hash, duplicate_of, requested_model, requested_mode, requested_format, actual_openai_model_used, diarized_json, recognized_towns, normalized_transcript, call_type, call_timestamp, tags, latitude, longitude, location_label, location_source, refined_metadata, address_json, needs_manual_review, created_at, updated_at FROM transcriptions`
 	where := []string{}
 	args := []interface{}{}
 	var cutoff time.Time
