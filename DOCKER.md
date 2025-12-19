@@ -1,29 +1,23 @@
 # Docker usage
 
-This project ships with a multi-stage Docker build that creates a minimal runtime image with `ffmpeg` available for audio preprocessing. The container is designed to be configured entirely through environment variables so it can be launched with `docker run` or compose without extra files.
+This project ships with a multi-stage Docker build that creates a minimal runtime image with `ffmpeg` available for audio preprocessing. The production topology runs the API, worker, and Next.js UI as separate services using Docker Compose.
 
-## Build
+## Production Compose
 
 ```bash
-docker build -t alert-framework .
+docker compose up -d --build
 ```
 
-## Run with environment variables
+This brings up:
 
-The image exposes port `8000` by default. Override settings with `-e` flags and mount a volume for persistent data:
+- `api` on `http://localhost:8000`
+- `worker` (no ports, handles watcher + queue)
+- `web` on `http://localhost:3000`
+
+### Optional dev compose
 
 ```bash
-docker run --rm \
-  -p 8000:8000 \
-  -v $(pwd)/data:/data \
-  -e HTTP_PORT=8000 \
-  -e CALLS_DIR=/data/calls \
-  -e WORK_DIR=/data/work \
-  -e DB_PATH=/data/work/transcriptions.db \
-  -e GROUPME_BOT_ID="your-bot-id" \
-  -e GROUPME_ACCESS_TOKEN="your-groupme-token" \
-  -e MAPBOX_TOKEN="your-mapbox-token" \
-  alert-framework
+docker compose -f docker-compose.dev.yml up --build
 ```
 
 ### Key environment variables
@@ -38,7 +32,10 @@ docker run --rm \
 - `FFMPEG_BIN`: Override the `ffmpeg` binary name/path if needed.
 - `PUBLIC_BASE_URL`: Base URL (scheme, host, and optional path prefix) used when building preview links and webhook payloads. Set this to your public domain when running behind a reverse proxy.
 - `EXTERNAL_LISTEN_BASE_URL`: Optional override for direct audio links sent to webhooks. Use this if audio files are hosted at a different domain or CDN; otherwise `PUBLIC_BASE_URL` (or `http://localhost:HTTP_PORT`) is used.
+- `ALERT_MODE`: Service role (`api`, `worker`, `all`). Compose sets this for the production split.
+- `STRICT_CONFIG`: Fail fast on config errors (set to `true` in production compose).
+- `IN_DOCKER`: Enables Docker-specific safeguards when set to `true`.
 
 To customize the prefix used in webhook listen URLs, set `PUBLIC_BASE_URL` to your public domain/path, or `EXTERNAL_LISTEN_BASE_URL` if the audio files live elsewhere.
 
-The entrypoint ensures `CALLS_DIR`, `WORK_DIR`, and `DB_PATH` are initialized before the application starts, making the container easy to run with only environment variables and a mounted data volume.
+Compose mounts `./data` to `/data`, `./runtime/calls` to `/data/calls`, and `./config` to `/app/config`. Ensure these host directories exist and are writable before starting the stack.

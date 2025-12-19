@@ -7,7 +7,7 @@ A Go-based automation service that watches a directory of new radio call recordi
 - Watches `CALLS_DIR` for new audio files and enqueues a deterministic ingest + transcription workflow.
 - Sends two-stage GroupMe notifications (initial alert + cleaned transcript) using the shared formatting engine.
 - Persists all call context, transcripts, tags, locations, and regen history inside a local SQLite database.
-- Embedded frontend (vanilla JS + Plotly + Mapbox) provides filtering, waveform playback, hotspot maps, and transcript utilities.
+- Embedded frontend (vanilla JS + Plotly + Mapbox) remains for fallback, while the Next.js CAD console lives in `web/`.
 - Sussex-focused metadata inference verifies street-level addresses with Mapbox after (optional) LLM-backed cleanup, keeping Lakeland EMS calls pinned to Andover Township unless transcripts clearly say otherwise.
 - Ships with Docker support, optional audio preprocessing via `ffmpeg`, and zero external dependencies beyond OpenAI + GroupMe.
 
@@ -21,7 +21,9 @@ alert_framework/
 ├── formatting/        # Alert copy helpers (GroupMe templates, location formatting, incident helpers)
 ├── metrics/           # Lightweight in-process metrics + debug endpoints
 ├── queue/             # Job definitions, in-memory queue, and worker orchestration
+├── web/               # Next.js 14 CAD console (dev server on :3000)
 ├── static/            # Embedded frontend (HTML/CSS/JS) plus UI tests
+├── scripts/           # Dev helper scripts
 ├── docker/            # Helper assets referenced by the Dockerfile
 ├── DOCKER.md          # Container build/run instructions
 ├── agents.md          # High-level system/agent documentation
@@ -46,14 +48,14 @@ Legacy backfill helpers are intentionally removed to keep the runtime focused on
 
 3. **Create the working directories referenced by `.env`**
    ```bash
-   mkdir -p ./data/calls ./data/work
+   mkdir -p ./runtime/calls ./runtime/work
    ```
 
 4. **Run the service locally**
    ```bash
-   go run .
+   make dev
    ```
-   The HTTP UI defaults to `http://localhost:8000` and immediately starts watching `CALLS_DIR` for new `.mp3` drops.
+   The API listens on `http://localhost:8000`, while the CAD console runs at `http://localhost:3000`.
 
 5. **Drop an `.mp3` into `CALLS_DIR`** to watch the ingest → alert → transcription flow in action.
 
@@ -64,9 +66,10 @@ All settings are sourced from environment variables (or `.env`). Common options:
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `HTTP_PORT` | HTTP listen address (accepts `:8000` or `8000`) | `:8000` |
-| `CALLS_DIR` | Directory to watch for new recordings | `/data/calls` |
-| `WORK_DIR` | Workspace for derived artifacts and the SQLite DB | `/data/work` |
+| `CALLS_DIR` | Directory to watch for new recordings | `./runtime/calls` |
+| `WORK_DIR` | Workspace for derived artifacts and the SQLite DB | `./runtime/work` |
 | `DB_PATH` | Explicit SQLite path (falls back to `$WORK_DIR/transcriptions.db`) | `""` |
+| `CONFIG_PATH` | YAML/JSON config path | `config/config.yaml` |
 | `OPENAI_API_KEY` | API key used for transcription + cleanup requests | none |
 | `GROUPME_BOT_ID` / `GROUPME_ACCESS_TOKEN` | Credentials for sending alerts | none |
 | `MAPBOX_TOKEN` | Enables hotspot and density overlays in the UI | none |
@@ -79,6 +82,9 @@ All settings are sourced from environment variables (or `.env`). Common options:
 | `JOB_TIMEOUT_SEC` | Max seconds a worker may hold a job | `60` |
 | `DEV_UI` | Enables extra UI traces/tooling when truthy | `false` |
 | `NLP_CONFIG_PATH` | Path to the GPT-5.1 prompt template file | `config/config.yaml` |
+| `ALERT_MODE` | Service role (`api`, `worker`, `all`) | `all` |
+| `STRICT_CONFIG` | Fail fast on config errors | `false` |
+| `IN_DOCKER` | Enables Docker-specific safeguards | `false` |
 
 Use `.env.example` as a starting point; it documents every variable that ships with the service.
 
@@ -103,8 +109,9 @@ The backend watches this file and reloads templates at runtime—no restart requ
 
 ## Development Workflow
 
-- `go run .` launches the watcher, queue, webhook sender, and HTTP server in one process.
-- Static assets are embedded at build time (`go:embed static/*`), so changes require rebuilding the binary.
+- `make dev` launches the watcher, queue, webhook sender, and API, plus the Next.js UI on port 3000.
+- `go run .` still runs everything in one process if you prefer the embedded UI.
+- `make reset` clears Next.js caches and stops rogue listeners on ports 3000/8000.
 - File watcher (fsnotify) only reacts to new `.mp3` writes/moves; use the UI controls to re-run transcription or formatting for existing calls.
 - The UI defaults to the last 24 hours of activity and polls the `/api/calls` endpoint every few seconds. Use the summary filters to inspect volume, tags, and hotspots.
 
@@ -113,12 +120,7 @@ The backend watches this file and reloads templates at runtime—no restart requ
 A multi-stage image is provided (see `DOCKER.md`). In short:
 
 ```bash
-docker build -t alert-framework .
-docker run --rm \
-  -p 8000:8000 \
-  -v $(pwd)/data:/data \
-  --env-file .env \
-  alert-framework
+docker compose up -d --build
 ```
 
 Mount a persistent volume for `/data` (or whichever directories you place in `CALLS_DIR`/`WORK_DIR`) to retain recordings and the SQLite database.
