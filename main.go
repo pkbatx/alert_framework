@@ -456,6 +456,27 @@ func parseAlertMode(value string) string {
 	}
 }
 
+func adminEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("ENABLE_ADMIN_ACTIONS")), "true")
+}
+
+func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if !adminEnabled() {
+		http.NotFound(w, r)
+		return false
+	}
+	token := strings.TrimSpace(os.Getenv("ADMIN_TOKEN"))
+	if token == "" {
+		http.Error(w, "admin actions disabled", http.StatusForbidden)
+		return false
+	}
+	if r.Header.Get("X-Admin-Token") != token {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 func main() {
 	config.LoadDotEnv(".env")
 	cfg, err := config.Load()
@@ -2394,6 +2415,9 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		respondJSON(w, settings)
 	case http.MethodPost:
+		if !requireAdmin(w, r) {
+			return
+		}
 		var payload AppSettings
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -2448,6 +2472,9 @@ func (s *server) handleFile(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleTranscriptionIndex(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		if !requireAdmin(w, r) {
+			return
+		}
 		filename := r.URL.Query().Get("filename")
 		if filename == "" {
 			http.Error(w, "filename required", http.StatusBadRequest)
@@ -2522,21 +2549,25 @@ func (s *server) handleTranscription(w http.ResponseWriter, r *http.Request) {
 			respondJSON(w, s.toResponse(*existing, base))
 			return
 		case statusError:
-			if s.queue == nil {
-				http.Error(w, "queue disabled", http.StatusServiceUnavailable)
+			if s.queue != nil && requireAdmin(w, r) {
+				s.queueJob("api", cleaned, false, true, opts)
+				respondJSON(w, map[string]interface{}{
+					"filename": existing.Filename,
+					"status":   statusQueued,
+				})
 				return
 			}
-			s.queueJob("api", cleaned, false, true, opts)
-			respondJSON(w, map[string]interface{}{
-				"filename": existing.Filename,
-				"status":   statusQueued,
-			})
+			respondJSON(w, s.toResponse(*existing, base))
 			return
 		}
 	}
 
 	if s.queue == nil {
 		http.Error(w, "queue disabled", http.StatusServiceUnavailable)
+		return
+	}
+	if !requireAdmin(w, r) {
+		http.NotFound(w, r)
 		return
 	}
 	s.queueJob("api", cleaned, false, true, opts)

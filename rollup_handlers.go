@@ -242,6 +242,9 @@ func (s *server) handleRollupRecompute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !requireAdmin(w, r) {
+		return
+	}
 	if s.queue == nil || s.rollups == nil {
 		http.Error(w, "rollup workers disabled", http.StatusServiceUnavailable)
 		return
