@@ -246,6 +246,9 @@ func Load() (Config, error) {
 		os.Getenv("OPENAI_API_BASE"),
 		cfg.Rollup.LLMBaseURL,
 	)
+	if cfg.Rollup.LLMEnabled && strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
+		log.Printf("rollup LLM enabled but OPENAI_API_KEY is not set")
+	}
 
 	nlpCfg, err := LoadNLPConfig(nlpPath)
 	if err != nil {

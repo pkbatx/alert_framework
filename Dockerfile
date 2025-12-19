@@ -20,8 +20,8 @@ FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates ffmpeg
 
-RUN addgroup -S app && adduser -S -G app app \\
-    && mkdir -p /data/calls /data/work \\
+RUN addgroup -S app && adduser -S -G app app \
+    && mkdir -p /data/calls /data/work \
     && chown -R app:app /data
 
 WORKDIR /app
