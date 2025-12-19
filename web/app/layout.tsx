@@ -48,6 +48,9 @@ export default function RootLayout({
                 <Link className="hover:text-white" href="/alerts">
                   Alerts
                 </Link>
+                <Link className="hover:text-white" href="/rollups">
+                  Rollups
+                </Link>
                 <Link className="hover:text-white" href="/tasks">
                   Tasks
                 </Link>
