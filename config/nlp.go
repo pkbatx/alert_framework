@@ -4,20 +4,23 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // NLPConfig captures prompt + tuning parameters used by the refinement pipeline.
 // The fields can be customized via config.yaml (JSON is also accepted because it
 // is a subset of YAML 1.2).
 type NLPConfig struct {
-	RefinementTemperature float64   `json:"refinement_temperature"`
-	CleanupStyle          string    `json:"cleanup_style"`
-	AddressMode           string    `json:"address_mode"`
-	MapboxBoundingBox     []float64 `json:"mapbox_bounding_box"`
-	CleanupPrompt         string    `json:"cleanup_prompt"`
-	MetadataPrompt        string    `json:"metadata_prompt"`
-	AddressPrompt         string    `json:"address_prompt"`
+	RefinementTemperature float64   `json:"refinement_temperature" yaml:"refinement_temperature"`
+	CleanupStyle          string    `json:"cleanup_style" yaml:"cleanup_style"`
+	AddressMode           string    `json:"address_mode" yaml:"address_mode"`
+	MapboxBoundingBox     []float64 `json:"mapbox_bounding_box" yaml:"mapbox_bounding_box"`
+	CleanupPrompt         string    `json:"cleanup_prompt" yaml:"cleanup_prompt"`
+	MetadataPrompt        string    `json:"metadata_prompt" yaml:"metadata_prompt"`
+	AddressPrompt         string    `json:"address_prompt" yaml:"address_prompt"`
 }
 
 const (
@@ -80,7 +83,7 @@ Return empty strings when unknown. Bias toward Sussex County.`,
 	}
 }
 
-// LoadNLPConfig reads config.yaml (JSON subset of YAML) and merges it with defaults.
+// LoadNLPConfig reads YAML/JSON and merges it with defaults.
 func LoadNLPConfig(path string) (NLPConfig, error) {
 	cfg := DefaultNLPConfig()
 	data, err := os.ReadFile(path)
@@ -91,36 +94,52 @@ func LoadNLPConfig(path string) (NLPConfig, error) {
 		return cfg, errors.New("empty config file")
 	}
 	var parsed struct {
-		NLP NLPConfig `json:"nlp"`
+		NLP NLPConfig `json:"nlp" yaml:"nlp"`
 	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return cfg, err
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".json":
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return cfg, err
+		}
+	case ".yaml", ".yml", "":
+		if err := yaml.Unmarshal(data, &parsed); err != nil {
+			return cfg, err
+		}
+	default:
+		if err := yaml.Unmarshal(data, &parsed); err != nil {
+			return cfg, err
+		}
 	}
-	override := parsed.NLP
-	if override.RefinementTemperature > 0 {
-		cfg.RefinementTemperature = override.RefinementTemperature
-	}
-	if stringsTrim(override.CleanupStyle) != "" {
-		cfg.CleanupStyle = override.CleanupStyle
-	}
-	if stringsTrim(override.AddressMode) != "" {
-		cfg.AddressMode = override.AddressMode
-	}
-	if len(override.MapboxBoundingBox) == 4 {
-		cfg.MapboxBoundingBox = append([]float64{}, override.MapboxBoundingBox...)
-	}
-	if stringsTrim(override.CleanupPrompt) != "" {
-		cfg.CleanupPrompt = override.CleanupPrompt
-	}
-	if stringsTrim(override.MetadataPrompt) != "" {
-		cfg.MetadataPrompt = override.MetadataPrompt
-	}
-	if stringsTrim(override.AddressPrompt) != "" {
-		cfg.AddressPrompt = override.AddressPrompt
-	}
-	return cfg, nil
+	return MergeNLPConfig(cfg, parsed.NLP), nil
 }
 
 func stringsTrim(v string) string {
 	return strings.TrimSpace(v)
+}
+
+// MergeNLPConfig overlays non-empty fields onto the base config.
+func MergeNLPConfig(base NLPConfig, override NLPConfig) NLPConfig {
+	if override.RefinementTemperature > 0 {
+		base.RefinementTemperature = override.RefinementTemperature
+	}
+	if stringsTrim(override.CleanupStyle) != "" {
+		base.CleanupStyle = override.CleanupStyle
+	}
+	if stringsTrim(override.AddressMode) != "" {
+		base.AddressMode = override.AddressMode
+	}
+	if len(override.MapboxBoundingBox) == 4 {
+		base.MapboxBoundingBox = append([]float64{}, override.MapboxBoundingBox...)
+	}
+	if stringsTrim(override.CleanupPrompt) != "" {
+		base.CleanupPrompt = override.CleanupPrompt
+	}
+	if stringsTrim(override.MetadataPrompt) != "" {
+		base.MetadataPrompt = override.MetadataPrompt
+	}
+	if stringsTrim(override.AddressPrompt) != "" {
+		base.AddressPrompt = override.AddressPrompt
+	}
+	return base
 }
