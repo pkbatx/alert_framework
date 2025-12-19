@@ -9,6 +9,7 @@ data/
 *.db
 *.db-shm
 *.db-wal
+*.mp3
 .gopath/
 .gocache/
 alert_server
