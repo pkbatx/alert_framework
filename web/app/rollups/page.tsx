@@ -103,6 +103,12 @@ export default function RollupsPage() {
   const loadRollups = useCallback(async () => {
     setLoading(true);
     setError(null);
+    if (health?.rollups?.reason === "disabled") {
+      setRollups([]);
+      setSelectedId(null);
+      setLoading(false);
+      return;
+    }
     const params = new URLSearchParams();
     if (filters.from) params.set("from", filters.from);
     if (filters.to) params.set("to", filters.to);
@@ -146,7 +152,7 @@ export default function RollupsPage() {
       setError((err as Error).message || "network error");
       setLoading(false);
     }
-  }, [filters]);
+  }, [filters, health]);
 
   useEffect(() => {
     void loadRollups();

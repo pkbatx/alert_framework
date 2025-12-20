@@ -11,17 +11,11 @@ import { cn } from "@/lib/utils";
 const callRowSchema = z.object({
   id: z.string(),
   ts: z.string(),
-  title: z.string().optional().nullable(),
-  summary: z.string().optional().nullable(),
-  transcript: z.string().optional().nullable(),
   source: z.string().optional().nullable(),
-  audio_url: z.string().optional().nullable(),
-  status: z.string().optional().nullable(),
-  location_text: z.string().optional().nullable(),
   filename: z.string().optional().nullable(),
-  call_type: z.string().optional().nullable(),
-  agency: z.string().optional().nullable(),
-  tags: z.array(z.string()).optional(),
+  audio_path: z.string().optional().nullable(),
+  status: z.string().optional().nullable(),
+  error: z.string().optional().nullable(),
 });
 
 const callListSchema = z.object({
@@ -29,26 +23,22 @@ const callListSchema = z.object({
 });
 
 const callDetailSchema = z.object({
-  call: z.object({
-    id: z.string(),
-    ts: z.string(),
-    title: z.string().optional().nullable(),
-    summary: z.string().optional().nullable(),
-    transcript: z.string().optional().nullable(),
-    source: z.string().optional().nullable(),
-    audio_url: z.string().optional().nullable(),
-    status: z.string().optional().nullable(),
-    location_text: z.string().optional().nullable(),
-    filename: z.string().optional().nullable(),
-    call_type: z.string().optional().nullable(),
-    agency: z.string().optional().nullable(),
-    tags: z.array(z.string()).optional(),
-  }),
+  call: callRowSchema,
 });
+
+const transcriptSchema = z.object({
+  text: z.string().optional().nullable(),
+}).passthrough();
+
+const metadataSchema = z.object({}).passthrough();
+const rollupSchema = z.object({}).passthrough();
 
 type CallRow = z.infer<typeof callRowSchema>;
 
 type CallDetail = z.infer<typeof callDetailSchema>["call"];
+type TranscriptPayload = z.infer<typeof transcriptSchema>;
+type MetadataPayload = z.infer<typeof metadataSchema>;
+type RollupPayload = z.infer<typeof rollupSchema>;
 
 function formatTimestamp(value?: string | null) {
   if (!value) return "-";
@@ -67,13 +57,24 @@ function SkeletonRow() {
   );
 }
 
+function formatJson(payload: Record<string, unknown> | null) {
+  if (!payload || Object.keys(payload).length === 0) {
+    return "Not available.";
+  }
+  return JSON.stringify(payload, null, 2);
+}
+
 export default function CallsPage() {
   const [calls, setCalls] = useState<CallRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CallDetail | null>(null);
+  const [transcript, setTranscript] = useState<TranscriptPayload | null>(null);
+  const [metadata, setMetadata] = useState<MetadataPayload | null>(null);
+  const [rollup, setRollup] = useState<RollupPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [filters, setFilters] = useState({
     search: "",
     status: "",
@@ -83,7 +84,7 @@ export default function CallsPage() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/calls?window=24h`, {
+      const response = await fetch(`/api/calls?since_hours=24&limit=200`, {
         cache: "no-store",
       });
       if (!response.ok) {
@@ -114,28 +115,81 @@ export default function CallsPage() {
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
+      setTranscript(null);
+      setMetadata(null);
+      setRollup(null);
       return;
     }
     setDetailLoading(true);
-    fetch(`/api/calls/${selectedId}?window=24h`, { cache: "no-store" })
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`status ${res.status}`);
+    setDetailError(null);
+    const controller = new AbortController();
+    const fetchDetail = async () => {
+      try {
+        const response = await fetch(`/api/calls/${selectedId}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`status ${response.status}`);
         }
-        return res.json();
-      })
-      .then((json) => {
+        const json = await response.json();
         const parsed = callDetailSchema.safeParse(json);
         if (parsed.success) {
           setDetail(parsed.data.call);
         } else {
           setDetail(null);
+          setDetailError("Invalid detail response");
         }
-      })
-      .catch(() => {
-        setDetail(null);
-      })
-      .finally(() => setDetailLoading(false));
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          setDetail(null);
+          setDetailError("Failed to load detail");
+        }
+      } finally {
+        setDetailLoading(false);
+      }
+    };
+
+    const fetchPayload = async <T,>(
+      url: string,
+      schema: z.ZodType<T>,
+      setter: (value: T | null) => void
+    ) => {
+      try {
+        const response = await fetch(url, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          setter(null);
+          return;
+        }
+        const json = await response.json();
+        const parsed = schema.safeParse(json);
+        setter(parsed.success ? parsed.data : null);
+      } catch {
+        setter(null);
+      }
+    };
+
+    void fetchDetail();
+    void fetchPayload(
+      `/api/calls/${selectedId}/transcript`,
+      transcriptSchema,
+      setTranscript
+    );
+    void fetchPayload(
+      `/api/calls/${selectedId}/metadata`,
+      metadataSchema,
+      setMetadata
+    );
+    void fetchPayload(
+      `/api/calls/${selectedId}/rollup`,
+      rollupSchema,
+      setRollup
+    );
+
+    return () => controller.abort();
   }, [selectedId]);
 
   const filtered = useMemo(() => {
@@ -145,7 +199,7 @@ export default function CallsPage() {
         return false;
       }
       if (!query) return true;
-      return [call.title, call.summary, call.location_text, call.filename]
+      return [call.filename, call.source, call.status, call.error]
         .filter(Boolean)
         .some((value) => (value as string).toLowerCase().includes(query));
     });
@@ -164,7 +218,7 @@ export default function CallsPage() {
           <div className="grid gap-2">
             <input
               className="rounded-md border border-panelBorder bg-slate-900/60 px-3 py-2 text-xs"
-              placeholder="Search by title, location, or summary"
+              placeholder="Search by filename, source, or status"
               value={filters.search}
               onChange={(event) =>
                 setFilters((prev) => ({ ...prev, search: event.target.value }))
@@ -226,20 +280,22 @@ export default function CallsPage() {
                       {formatTimestamp(call.ts)}
                     </span>
                     {call.status && (
-                      <Badge variant={call.status === "done" ? "accent" : "default"}>
+                      <Badge
+                        variant={call.status === "complete" ? "accent" : "default"}
+                      >
                         {call.status}
                       </Badge>
                     )}
                   </div>
                   <div className="mt-2 text-sm font-semibold text-slate-100">
-                    {call.title || call.filename || "Untitled call"}
+                    {call.filename || call.id || "Untitled call"}
                   </div>
                   <div className="mt-1 text-xs text-slate-400">
-                    {call.location_text || call.agency || "-"}
+                    {call.source || "-"}
                   </div>
-                  {call.summary && (
-                    <div className="mt-2 line-clamp-2 text-xs text-slate-400">
-                      {call.summary}
+                  {call.error && (
+                    <div className="mt-2 line-clamp-2 text-xs text-red-300">
+                      {call.error}
                     </div>
                   )}
                 </button>
@@ -258,6 +314,11 @@ export default function CallsPage() {
             {!selectedCall && !detailLoading && (
               <p className="text-sm text-slate-400">Select a call to view details.</p>
             )}
+            {detailError && !detailLoading && (
+              <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300">
+                {detailError}
+              </div>
+            )}
             {detailLoading && (
               <div className="space-y-3">
                 <div className="h-4 w-40 animate-pulse rounded bg-slate-800" />
@@ -270,40 +331,59 @@ export default function CallsPage() {
                   {selectedCall.status && (
                     <Badge variant="accent">{selectedCall.status}</Badge>
                   )}
-                  {selectedCall.call_type && (
-                    <Badge>{selectedCall.call_type}</Badge>
+                  {selectedCall.source && (
+                    <Badge variant="subtle">{selectedCall.source}</Badge>
                   )}
-                  {selectedCall.location_text && (
-                    <Badge variant="subtle">{selectedCall.location_text}</Badge>
-                  )}
-                  {selectedCall.tags?.map((tag) => (
-                    <Badge key={tag} variant="subtle">
-                      {tag}
-                    </Badge>
-                  ))}
                 </div>
-                {selectedCall.audio_url ? (
-                  <audio controls className="w-full">
-                    <source src={selectedCall.audio_url} />
-                  </audio>
-                ) : (
-                  <p className="text-xs text-slate-500">No audio URL available.</p>
+                <div className="flex flex-wrap gap-3 text-xs text-slate-400">
+                  <span>ID: {selectedCall.id}</span>
+                  <span>Updated: {formatTimestamp(selectedCall.ts)}</span>
+                </div>
+                {selectedCall.error && (
+                  <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300">
+                    {selectedCall.error}
+                  </div>
                 )}
                 <div>
-                  <p className="text-xs uppercase tracking-widest text-slate-500">Summary</p>
-                  <p className="mt-2 text-sm text-slate-200">
-                    {selectedCall.summary || "No summary available."}
+                  <p className="text-xs uppercase tracking-widest text-slate-500">
+                    Audio
+                  </p>
+                  {selectedCall.audio_path?.startsWith("http") ? (
+                    <audio controls className="w-full">
+                      <source src={selectedCall.audio_path} />
+                    </audio>
+                  ) : (
+                    <p className="mt-2 text-xs text-slate-400">
+                      {selectedCall.audio_path || "No audio path available."}
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-widest text-slate-500">
+                    Transcript
+                  </p>
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-slate-200">
+                    {transcript?.text || "Transcript pending."}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs uppercase tracking-widest text-slate-500">Transcript</p>
-                  <p className="mt-2 whitespace-pre-wrap text-sm text-slate-200">
-                    {selectedCall.transcript || "Transcript pending."}
+                  <p className="text-xs uppercase tracking-widest text-slate-500">
+                    Metadata
                   </p>
+                  <pre className="mt-2 whitespace-pre-wrap text-xs text-slate-300">
+                    {formatJson(metadata as Record<string, unknown> | null)}
+                  </pre>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-widest text-slate-500">
+                    Rollup
+                  </p>
+                  <pre className="mt-2 whitespace-pre-wrap text-xs text-slate-300">
+                    {formatJson(rollup as Record<string, unknown> | null)}
+                  </pre>
                 </div>
                 <div className="flex flex-wrap gap-3 text-xs text-slate-400">
                   <span>File: {selectedCall.filename || "-"}</span>
-                  <span>Updated: {formatTimestamp(selectedCall.ts)}</span>
                 </div>
               </>
             )}

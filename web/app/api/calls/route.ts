@@ -6,50 +6,41 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type UpstreamCall = {
-  id?: number;
-  filename?: string;
-  status?: string;
-  call_timestamp?: string;
-  created_at?: string;
-  pretty_title?: string;
-  summary?: string;
-  clean_summary?: string;
-  call_type?: string;
-  audio_url?: string;
+  id?: string;
+  ts?: string;
   source?: string;
-  location?: { label?: string };
-  city_or_town?: string;
-  town?: string;
-  agency?: string;
-  tags?: string[];
+  original_filename?: string;
+  stored_audio_path?: string;
+  status?: string;
+  error?: string;
 };
 
 function mapCall(call: UpstreamCall) {
-  const timestamp = call.call_timestamp ?? call.created_at ?? "";
   return {
     id: String(call.id ?? ""),
-    ts: timestamp,
-    title: call.pretty_title ?? call.call_type ?? call.filename ?? "",
-    summary: call.summary ?? call.clean_summary ?? "",
+    ts: call.ts ?? "",
     source: call.source ?? "",
-    audio_url: call.audio_url ?? "",
+    filename: call.original_filename ?? "",
+    audio_path: call.stored_audio_path ?? "",
     status: call.status ?? "",
-    location_text:
-      call.location?.label ?? call.city_or_town ?? call.town ?? "",
-    filename: call.filename ?? "",
-    call_type: call.call_type ?? "",
-    agency: call.agency ?? "",
-    tags: call.tags ?? [],
+    error: call.error ?? "",
   };
 }
 
 export async function GET(request: NextRequest) {
   const apiBase = getApiBase();
-  const upstream = new URL("/api/transcriptions", apiBase);
-  upstream.search = request.nextUrl.search;
-  if (!upstream.searchParams.get("window")) {
-    upstream.searchParams.set("window", "24h");
+  const upstream = new URL("/calls", apiBase);
+  const params = request.nextUrl.searchParams;
+  const sinceHours = params.get("since_hours") ?? params.get("sinceHours");
+  const windowParam = params.get("window");
+  if (sinceHours) {
+    upstream.searchParams.set("since_hours", sinceHours);
+  } else if (windowParam?.endsWith("h")) {
+    upstream.searchParams.set("since_hours", windowParam.replace("h", ""));
+  } else {
+    upstream.searchParams.set("since_hours", "24");
   }
+  upstream.searchParams.set("limit", params.get("limit") ?? "200");
 
   try {
     const { response, duration } = await fetchUpstream(upstream);
@@ -59,8 +50,8 @@ export async function GET(request: NextRequest) {
       );
       return proxyJsonError("upstream error", response.status, upstream.href);
     }
-    const payload = (await response.json()) as { calls?: UpstreamCall[] };
-    const calls = Array.isArray(payload.calls) ? payload.calls : [];
+    const payload = (await response.json()) as UpstreamCall[];
+    const calls = Array.isArray(payload) ? payload : [];
     return NextResponse.json({ calls: calls.map(mapCall) });
   } catch (err) {
     console.warn(`proxy /api/calls error: ${(err as Error).message}`);

@@ -8,8 +8,6 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const apiBase = getApiBase();
   const healthURL = new URL("/healthz", apiBase);
-  const rollupsURL = new URL("/api/rollups", apiBase);
-  rollupsURL.searchParams.set("limit", "1");
 
   let apiOk = false;
   let apiStatus = 0;
@@ -21,28 +19,9 @@ export async function GET() {
     apiOk = false;
   }
 
-  let rollupsOk = false;
-  let rollupsStatus = 0;
-  let rollupsReason = "unknown";
-  if (apiOk) {
-    try {
-      const { response } = await fetchUpstream(rollupsURL, {}, 4000);
-      rollupsStatus = response.status;
-      rollupsOk = response.ok;
-      if (!rollupsOk && rollupsStatus === 404) {
-        rollupsReason = "disabled";
-      } else if (!rollupsOk) {
-        rollupsReason = "unavailable";
-      } else {
-        rollupsReason = "ok";
-      }
-    } catch {
-      rollupsOk = false;
-      rollupsReason = "unavailable";
-    }
-  } else {
-    rollupsReason = "api_down";
-  }
+  const rollupsOk = false;
+  const rollupsStatus = 404;
+  const rollupsReason = apiOk ? "disabled" : "api_down";
 
   return NextResponse.json({
     ok: apiOk,
