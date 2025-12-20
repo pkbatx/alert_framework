@@ -24,4 +24,4 @@ RUN pip install --no-cache-dir \
     fastapi \
     uvicorn
 
-CMD ["uvicorn", "caad_skillkit.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["uvicorn", "caad_skillkit.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

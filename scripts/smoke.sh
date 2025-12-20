@@ -6,7 +6,7 @@ cd "$ROOT"
 
 COMPOSE="docker compose"
 SERVICES="$($COMPOSE config --services)"
-START_SERVICES=("store_api")
+START_SERVICES=("api")
 
 if echo "$SERVICES" | grep -qx "localai"; then
   START_SERVICES+=("localai")
@@ -14,7 +14,7 @@ fi
 
 $COMPOSE up -d --build "${START_SERVICES[@]}"
 
-API_PORT="${CAAD_API_PORT:-8090}"
+API_PORT="${CAAD_API_PORT:-8000}"
 for _ in $(seq 1 30); do
   if curl -fsS "http://127.0.0.1:$API_PORT/healthz" >/dev/null 2>&1; then
     break
