@@ -1,9 +1,9 @@
 <!-- CAAD_DOCS_BEGIN -->
-## `worker/` boundary (managed)
+## `core/` boundary (managed)
 
-Role: Polling ingestion worker (audio → artifacts).
-Must not live here: UI, API, or DB migrations.
-Depends on it: Skillkit AI + core store.
+Role: File-based artifact store helpers (paths, atomic writes).
+Must not live here: Ingestion logic or AI clients.
+Depends on it: Worker and CLI store commands.
 Runtime-critical: yes
 Safe to delete: no
 Status: active

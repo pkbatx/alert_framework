@@ -9,6 +9,8 @@ dependencies = [
   "pydantic",
   "jsonschema",
   "openai",
+  "fastapi",
+  "uvicorn",
 ]
 
 [project.scripts]

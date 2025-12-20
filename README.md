@@ -163,12 +163,13 @@ With those cosmetics in place the repository is ready for a public GitHub releas
 <!-- CAAD_DOCS_BEGIN -->
 ## CAAD System Overview (managed)
 
-This repository is evolving in phased increments. Phases 0–2 establish:
+Current system behavior (Phases 0–2):
 
-- JSON contracts in `contracts/`
-- A file-based artifact store under `runtime/`
-- A polling ingestion worker in `worker/`
-- A repo-local skillkit CLI in `skills/`
+- Polling worker ingests audio from `CALLS_DIR` and writes call artifacts
+- File-based artifact store under `runtime/calls/<call_id>/`
+- Contracts in `contracts/` define every JSON artifact
+- Skillkit (`caad` CLI) provides AI, validation, and doc tooling
 
-See `STRUCTURE.md` for the authoritative top-level map.
+There is no UI or database in the Phase 0–2 pipeline; legacy Go/Next assets remain but are inactive.
+See `STRUCTURE.md` for boundary-level details.
 <!-- CAAD_DOCS_END -->
