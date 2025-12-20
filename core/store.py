@@ -72,6 +72,10 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
+def write_json_atomic(path: str, payload: Dict[str, Any]) -> None:
+    _atomic_write_json(Path(path), payload)
+
+
 def write_call_record(call_record: Dict[str, Any]) -> Dict[str, Any]:
     validated = _validate(call_record, "call_record")
     call_id = validated["id"]

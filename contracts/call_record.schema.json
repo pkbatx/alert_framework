@@ -7,7 +7,8 @@
     "id",
     "ts",
     "source",
-    "audio_path",
+    "original_filename",
+    "stored_audio_path",
     "transcript_path",
     "metadata_path",
     "rollup_path",
@@ -17,10 +18,12 @@
     "id": { "type": "string" },
     "ts": { "type": "string" },
     "source": { "type": "string" },
-    "audio_path": { "type": "string" },
+    "original_filename": { "type": "string" },
+    "stored_audio_path": { "type": "string" },
     "transcript_path": { "type": "string" },
     "metadata_path": { "type": "string" },
     "rollup_path": { "type": "string" },
-    "status": { "type": "string" }
+    "status": { "type": "string" },
+    "error": { "type": "string" }
   }
 }

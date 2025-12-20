@@ -31,7 +31,9 @@ web/.env.local
 runtime/calls/*.mp3
 runtime/.DS_Store
 .DS_Store
-runtime/
+._*
+runtime/**
+!runtime/README.md
 models/*.gguf
 
 

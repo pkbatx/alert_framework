@@ -27,6 +27,8 @@ from caad_skillkit.config import load_env_file
 from caad_skillkit.ops.env import env_check, env_write, env_write_from_keychain
 from caad_skillkit.ops.smoke import localai_chat_test, localai_models, localai_readyz
 from core import store as core_store
+from worker import ingest as ingest_worker
+from caad_skillkit.docs.generator import docs_all, docs_boundaries, docs_readme, docs_structure, docs_validate
 
 
 def emit_ok(data: Any, pretty: bool = False) -> None:
@@ -213,6 +215,82 @@ def store_show_cmd(call_id: str) -> None:
 def store_paths_cmd(call_id: str) -> None:
     load_repo_env()
     emit_ok(core_store.paths_for_call(call_id))
+
+
+@cli.group()
+def worker() -> None:
+    """Ingestion worker helpers."""
+
+
+@worker.command("run")
+def worker_run_cmd() -> None:
+    load_repo_env()
+    ingest_worker.run_watcher()
+
+
+@worker.command("process")
+@click.option("--input", "input_path", required=True, type=click.Path(exists=True, dir_okay=False))
+def worker_process_cmd(input_path: str) -> None:
+    load_repo_env()
+    record = ingest_worker.process_file(Path(input_path), Path(os.getenv("CALLS_DIR") or "runtime/inbox"))
+    sys.stdout.write(json.dumps(record, ensure_ascii=False))
+    sys.stdout.write("\n")
+
+
+@cli.group()
+def docs() -> None:
+    """Documentation helpers."""
+
+
+def _resolve_write(write: bool) -> bool:
+    return write
+
+
+@docs.command("structure")
+@click.option("--dry-run/--write", "write", default=False)
+def docs_structure_cmd(write: bool) -> None:
+    try:
+        result = docs_structure(_resolve_write(write))
+        emit_ok({"changes": [str(change.path) for change in result if change.changed]})
+    except Exception as err:
+        emit_err("docs_structure_failed", str(err))
+
+
+@docs.command("readme")
+@click.option("--dry-run/--write", "write", default=False)
+def docs_readme_cmd(write: bool) -> None:
+    try:
+        result = docs_readme(_resolve_write(write))
+        emit_ok({"changes": [str(change.path) for change in result if change.changed]})
+    except Exception as err:
+        emit_err("docs_readme_failed", str(err))
+
+
+@docs.command("boundaries")
+@click.option("--dry-run/--write", "write", default=False)
+def docs_boundaries_cmd(write: bool) -> None:
+    try:
+        result = docs_boundaries(_resolve_write(write))
+        emit_ok({"changes": [str(change.path) for change in result if change.changed]})
+    except Exception as err:
+        emit_err("docs_boundaries_failed", str(err))
+
+
+@docs.command("validate")
+def docs_validate_cmd() -> None:
+    try:
+        emit_ok(docs_validate())
+    except Exception as err:
+        emit_err("docs_validate_failed", str(err))
+
+
+@docs.command("all")
+@click.option("--dry-run/--write", "write", default=False)
+def docs_all_cmd(write: bool) -> None:
+    try:
+        emit_ok(docs_all(_resolve_write(write)))
+    except Exception as err:
+        emit_err("docs_all_failed", str(err))
 
 
 def main() -> None:

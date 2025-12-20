@@ -159,3 +159,16 @@ The Go tests cover configuration, formatting, and queue helpers, while the Node 
 - [ ] Pin `JOB_QUEUE_SIZE`, `WORKER_COUNT`, and `JOB_TIMEOUT_SEC` to match the expected ingest volume.
 
 With those cosmetics in place the repository is ready for a public GitHub release without touching the underlying runtime behavior.
+
+<!-- CAAD_DOCS_BEGIN -->
+## CAAD System Overview (managed)
+
+This repository is evolving in phased increments. Phases 0–2 establish:
+
+- JSON contracts in `contracts/`
+- A file-based artifact store under `runtime/`
+- A polling ingestion worker in `worker/`
+- A repo-local skillkit CLI in `skills/`
+
+See `STRUCTURE.md` for the authoritative top-level map.
+<!-- CAAD_DOCS_END -->

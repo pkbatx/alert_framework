@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict
 
+from jsonschema import validate as jsonschema_validate
+from jsonschema.exceptions import ValidationError
+
 from caad_skillkit.ai.clients import localai_transcribe, openai_transcribe
+from caad_skillkit.ai.schemas import get_schema
 from caad_skillkit.config import get_env, load_settings
 
 
@@ -33,10 +37,15 @@ def transcribe_audio(path: str) -> Dict[str, Any]:
     else:
         raise TranscribeError(f"unsupported TRANSCRIBE_BACKEND {backend}")
 
-    return {
+    payload = {
         "text": text,
         "language": raw.get("language", "") if isinstance(raw, dict) else "",
         "confidence": None,
         "duration_s": None,
         "segments": [],
     }
+    try:
+        jsonschema_validate(payload, get_schema("transcription"))
+    except ValidationError as err:
+        raise TranscribeError(f"transcription schema validation failed: {err.message}") from err
+    return payload
