@@ -1,22 +1,8 @@
 import "./globals.css";
 import Link from "next/link";
-import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
 
 import HeaderStatus from "@/components/header-status";
 import VersionFooter from "@/components/version-footer";
-
-const sans = Space_Grotesk({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-sans",
-});
-
-const mono = IBM_Plex_Mono({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-mono",
-  weight: ["400", "500", "600"],
-});
 
 export const metadata = {
   title: "Alert Framework CAD",
@@ -29,7 +15,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`dark ${sans.variable} ${mono.variable}`}>
+    <html lang="en" className="dark">
       <body>
         <div className="min-h-screen">
           <header className="border-b border-panelBorder bg-slate-950/60 px-6 py-4">
